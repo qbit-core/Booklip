@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 
-@MainActor
 final class OneDriveService: ObservableObject {
     @Published var isSignedIn = false
     @Published var isLoading  = false
@@ -21,15 +20,16 @@ final class OneDriveService: ObservableObject {
 
     // MARK: - Auth
 
-    func signIn() async {
+    @MainActor func signIn() async {
         do {
-            token = try await OAuthSession.authorize(
+            let t = try await OAuthSession.authorize(
                 authURL: Self.authURL,
                 tokenURL: Self.tokenURL,
                 clientID: CloudConfig.oneDriveClientID,
                 redirectURI: CloudConfig.oneDriveRedirectURI,
                 scopes: ["Files.Read", "offline_access"]
             )
+            token = t
             isSignedIn = true
             error = nil
         } catch {
@@ -37,7 +37,7 @@ final class OneDriveService: ObservableObject {
         }
     }
 
-    func signOut() {
+    @MainActor func signOut() {
         token = nil
         isSignedIn = false
     }
