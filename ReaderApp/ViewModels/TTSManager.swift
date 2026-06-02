@@ -14,9 +14,12 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var startOffset = 0
 
     var availableVoices: [AVSpeechSynthesisVoice] {
+        // Show all installed voices sorted by language then name,
+        // so Korean voices appear when reading Korean books.
         AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix(Locale.current.language.languageCode?.identifier ?? "en") }
-            .sorted { $0.name < $1.name }
+            .sorted {
+                $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
+            }
     }
 
     var selectedVoice: AVSpeechSynthesisVoice? {

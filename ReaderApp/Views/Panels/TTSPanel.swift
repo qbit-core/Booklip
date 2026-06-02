@@ -8,61 +8,70 @@ struct TTSPanel: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                // Playback controls
-                Section {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+
+                    // Playback controls
                     HStack(spacing: 32) {
                         Spacer()
                         Button {
                             tts.togglePlayPause(text: vm.plainText, currentOffset: vm.ttsOffset)
                         } label: {
                             Image(systemName: tts.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                                .font(.system(size: 60))
-                                .symbolEffect(.variableColor, isActive: tts.isPlaying)
+                                .font(.system(size: 64))
                         }
                         .buttonStyle(.plain)
-                        Button {
-                            tts.stop()
-                        } label: {
+
+                        Button { tts.stop() } label: {
                             Image(systemName: "stop.circle")
-                                .font(.system(size: 40))
+                                .font(.system(size: 44))
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
                         Spacer()
                     }
                     .padding(.vertical, 8)
-                    .listRowBackground(Color.clear)
-                }
 
-                // Voice selection
-                Section("Voice") {
-                    Picker("Voice", selection: $tts.selectedVoiceID) {
-                        ForEach(tts.availableVoices, id: \.identifier) { voice in
-                            VStack(alignment: .leading) {
-                                Text(voice.name)
-                                Text(voice.language)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                    // Voice
+                    PanelSection(title: "Voice") {
+                        Picker(selection: $tts.selectedVoiceID, label: EmptyView()) {
+                            ForEach(tts.availableVoices, id: \.identifier) { voice in
+                                Text("\(voice.name)  (\(voice.language))")
+                                    .tag(voice.identifier)
                             }
-                            .tag(voice.identifier)
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    // Speed
+                    PanelSection(title: "Speed") {
+                        HStack {
+                            Slider(value: $tts.rate,
+                                   in: AVSpeechUtteranceMinimumSpeechRate...AVSpeechUtteranceMaximumSpeechRate)
+                                .tint(.accentColor)
+                            Text(speedLabel)
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .trailing)
                         }
                     }
-                    .pickerStyle(.inline)
-                    .frame(height: 140)
-                }
 
-                // Speed
-                Section("Speed  \(speedLabel)") {
-                    Slider(value: $tts.rate, in: AVSpeechUtteranceMinimumSpeechRate...AVSpeechUtteranceMaximumSpeechRate)
-                        .tint(.accentColor)
+                    // Pitch
+                    PanelSection(title: "Pitch") {
+                        HStack {
+                            Slider(value: $tts.pitch, in: 0.5...2.0)
+                                .tint(.accentColor)
+                            Text(pitchLabel)
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .trailing)
+                        }
+                    }
                 }
-
-                // Pitch
-                Section("Pitch  \(pitchLabel)") {
-                    Slider(value: $tts.pitch, in: 0.5...2.0)
-                        .tint(.accentColor)
-                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
             }
             .navigationTitle("Text to Speech")
             .inlineNavigationTitle()
@@ -83,5 +92,18 @@ struct TTSPanel: View {
 
     private var pitchLabel: String {
         String(format: "%.1fx", tts.pitch)
+    }
+}
+
+private struct PanelSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
     }
 }
