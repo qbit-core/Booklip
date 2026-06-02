@@ -4,39 +4,72 @@ import PDFKit
 
 class LibraryViewModel: ObservableObject {
     @Published var books: [Book] = []
+    @Published var folders: [BookFolder] = []
+    @Published var sortOption: SortOption = .dateAdded
     @Published var importError: String?
     @Published var showingImportError = false
 
     init() {
         books = BookStore.load()
+        folders = BookStore.loadFolders()
         migrateUUIDTitles()
     }
 
-    // Fixes books that were imported before the title-extraction fix.
-    // PDFs: re-reads metadata. Others: cannot recover original name, leaves as-is.
-    private func migrateUUIDTitles() {
-        var changed = false
-        for i in books.indices where looksLikeUUID(books[i].title) {
-            switch books[i].format {
-            case .pdf:
-                if let doc = PDFDocument(url: books[i].fileURL),
-                   let title = doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String,
-                   !title.isEmpty {
-                    books[i].title = title
-                    changed = true
-                }
-            default:
-                break
-            }
+    // MARK: - Sorting
+
+    func sorted(_ list: [Book]) -> [Book] {
+        switch sortOption {
+        case .dateAdded: return list.sorted { $0.dateAdded > $1.dateAdded }
+        case .title:     return list.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .author:    return list.sorted { $0.author.localizedCaseInsensitiveCompare($1.author) == .orderedAscending }
+        case .progress:  return list.sorted { $0.progress > $1.progress }
+        case .format:    return list.sorted { $0.format.displayName < $1.format.displayName }
         }
-        if changed { BookStore.save(books) }
     }
 
-    private func looksLikeUUID(_ string: String) -> Bool {
-        UUID(uuidString: string) != nil
+    // MARK: - Folder queries
+
+    func books(in folder: BookFolder) -> [Book] {
+        sorted(books.filter { $0.folderID == folder.id })
     }
 
-    func importBook(from url: URL) {
+    var unfolderedBooks: [Book] {
+        sorted(books.filter { $0.folderID == nil })
+    }
+
+    // MARK: - Folder management
+
+    func createFolder(named name: String) {
+        let folder = BookFolder(name: name)
+        folders.append(folder)
+        BookStore.saveFolders(folders)
+    }
+
+    func renameFolder(_ folder: BookFolder, to name: String) {
+        guard let i = folders.firstIndex(where: { $0.id == folder.id }) else { return }
+        folders[i].name = name
+        BookStore.saveFolders(folders)
+    }
+
+    func deleteFolder(_ folder: BookFolder) {
+        // Move books in this folder back to unfoldered
+        for i in books.indices where books[i].folderID == folder.id {
+            books[i].folderID = nil
+        }
+        folders.removeAll { $0.id == folder.id }
+        BookStore.save(books)
+        BookStore.saveFolders(folders)
+    }
+
+    func moveBook(_ book: Book, to folder: BookFolder?) {
+        guard let i = books.firstIndex(where: { $0.id == book.id }) else { return }
+        books[i].folderID = folder?.id
+        BookStore.save(books)
+    }
+
+    // MARK: - Import
+
+    func importBook(from url: URL, into folder: BookFolder? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 guard let format = BookFormat.from(url: url) else {
@@ -46,16 +79,11 @@ class LibraryViewModel: ObservableObject {
                 let fileName = try BookStore.importFile(from: url)
                 let fileURL = BookStore.documentsDirectory.appendingPathComponent(fileName)
                 let parsed = try ParserFactory.parse(url: fileURL, format: format)
-                // Use original filename as title if the parser couldn't extract one
                 let fileNameStem = (fileName as NSString).deletingPathExtension
                 let title = parsed.title.isEmpty || parsed.title == fileNameStem ? originalName : parsed.title
-                var book = Book(
-                    title: title,
-                    author: parsed.author,
-                    format: format,
-                    fileName: fileName
-                )
+                var book = Book(title: title, author: parsed.author, format: format, fileName: fileName)
                 book.wordCount = parsed.wordCount
+                book.folderID = folder?.id
                 DispatchQueue.main.async {
                     self.books.append(book)
                     BookStore.save(self.books)
@@ -69,17 +97,44 @@ class LibraryViewModel: ObservableObject {
         }
     }
 
-    func delete(at offsets: IndexSet) {
-        for index in offsets { BookStore.delete(book: books[index]) }
-        books.remove(atOffsets: offsets)
+    func delete(book: Book) {
+        BookStore.delete(book: book)
+        books.removeAll { $0.id == book.id }
+        BookStore.save(books)
+    }
+
+    func delete(at offsets: IndexSet, in list: [Book]) {
+        let ids = offsets.map { list[$0].id }
+        ids.forEach { id in
+            if let book = books.first(where: { $0.id == id }) { BookStore.delete(book: book) }
+        }
+        books.removeAll { ids.contains($0.id) }
         BookStore.save(books)
     }
 
     func updateProgress(for bookID: UUID, progress: Double) {
-        guard let index = books.firstIndex(where: { $0.id == bookID }) else { return }
-        books[index].progress = progress
+        guard let i = books.firstIndex(where: { $0.id == bookID }) else { return }
+        books[i].progress = progress
         BookStore.save(books)
     }
+
+    // MARK: - Migration
+
+    private func migrateUUIDTitles() {
+        var changed = false
+        for i in books.indices where looksLikeUUID(books[i].title) {
+            if books[i].format == .pdf,
+               let doc = PDFDocument(url: books[i].fileURL),
+               let title = doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String,
+               !title.isEmpty {
+                books[i].title = title
+                changed = true
+            }
+        }
+        if changed { BookStore.save(books) }
+    }
+
+    private func looksLikeUUID(_ string: String) -> Bool { UUID(uuidString: string) != nil }
 }
 
 enum ImportError: LocalizedError {

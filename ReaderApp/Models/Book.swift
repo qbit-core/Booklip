@@ -23,6 +23,15 @@ enum BookFormat: String, Codable, CaseIterable {
     }
 }
 
+enum SortOption: String, CaseIterable, Identifiable {
+    case dateAdded = "Date Added"
+    case title     = "Title"
+    case author    = "Author"
+    case progress  = "Progress"
+    case format    = "Format"
+    var id: String { rawValue }
+}
+
 struct Book: Identifiable, Codable {
     var id: UUID = UUID()
     var title: String
@@ -32,6 +41,7 @@ struct Book: Identifiable, Codable {
     var progress: Double = 0.0
     var dateAdded: Date = Date()
     var wordCount: Int = 0
+    var folderID: UUID? = nil
 
     var fileURL: URL {
         BookStore.documentsDirectory.appendingPathComponent(fileName)
