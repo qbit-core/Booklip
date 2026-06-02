@@ -2,7 +2,6 @@ import AuthenticationServices
 import Foundation
 
 /// Lightweight OAuth 2.0 helper using ASWebAuthenticationSession.
-@MainActor
 final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProviding {
     struct Token: Codable {
         var accessToken: String
@@ -11,8 +10,15 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
         var isExpired: Bool { Date() >= expiresAt }
     }
 
-    // MARK: - Authorization Code Flow
+    // MARK: - Singleton for presentation context
 
+    static let shared = OAuthSession()
+    private var activeSession: ASWebAuthenticationSession?
+
+    // MARK: - Authorization Code Flow
+    // Must be called from @MainActor — ASWebAuthenticationSession requires it.
+
+    @MainActor
     static func authorize(
         authURL: URL,
         tokenURL: URL,
@@ -52,17 +58,17 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
         return try await exchangeCode(code, tokenURL: tokenURL, clientID: clientID, redirectURI: redirectURI)
     }
 
-    // MARK: - Token Exchange
+    // MARK: - Token Exchange (nonisolated — pure networking)
 
     static func exchangeCode(_ code: String, tokenURL: URL, clientID: String, redirectURI: String) async throws -> Token {
         var req = URLRequest(url: tokenURL)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         let body = [
-            "grant_type":   "authorization_code",
-            "code":          code,
-            "client_id":     clientID,
-            "redirect_uri":  redirectURI,
+            "grant_type":  "authorization_code",
+            "code":         code,
+            "client_id":    clientID,
+            "redirect_uri": redirectURI,
         ].map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" }
          .joined(separator: "&")
         req.httpBody = body.data(using: .utf8)
@@ -90,14 +96,10 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
     private static func parseToken(from data: Data) throws -> Token {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
         guard let access = json["access_token"] as? String else { throw OAuthError.badResponse }
-        let expires = (json["expires_in"] as? TimeInterval).map { Date().addingTimeInterval($0) } ?? Date().addingTimeInterval(3600)
+        let expires = (json["expires_in"] as? TimeInterval)
+            .map { Date().addingTimeInterval($0) } ?? Date().addingTimeInterval(3600)
         return Token(accessToken: access, refreshToken: json["refresh_token"] as? String, expiresAt: expires)
     }
-
-    // MARK: - Singleton for presentation context
-
-    static let shared = OAuthSession()
-    private var activeSession: ASWebAuthenticationSession?
 
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
 #if os(iOS)
