@@ -23,8 +23,12 @@ enum BookStore {
     static func importFile(from url: URL) throws -> String {
         let fileName = UUID().uuidString + "." + url.pathExtension
         let destination = documentsDirectory.appendingPathComponent(fileName)
+        // Security-scoped resource access (needed for files picked via document picker)
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
         try FileManager.default.copyItem(at: url, to: destination)
         return fileName
     }

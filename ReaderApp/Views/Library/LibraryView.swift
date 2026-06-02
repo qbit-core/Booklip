@@ -5,6 +5,7 @@ struct LibraryView: View {
     @EnvironmentObject private var library: LibraryViewModel
     @EnvironmentObject private var settings: ReadingSettings
     @State private var showingFilePicker = false
+    @State private var showingURLImport = false
     @State private var searchText = ""
     @State private var showingNewFolder = false
     @State private var newFolderName = ""
@@ -39,6 +40,9 @@ struct LibraryView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(library.importError ?? "")
+            }
+            .sheet(isPresented: $showingURLImport) {
+                URLImportView { url in library.importBook(from: url) }
             }
             .alert("New Folder", isPresented: $showingNewFolder) {
                 TextField("Folder name", text: $newFolderName)
@@ -75,7 +79,14 @@ struct LibraryView: View {
                     }
                 }
 
-                Button { showingFilePicker = true } label: {
+                Menu {
+                    Button { showingFilePicker = true } label: {
+                        Label("Browse Files", systemImage: "folder")
+                    }
+                    Button { showingURLImport = true } label: {
+                        Label("Import from URL", systemImage: "link")
+                    }
+                } label: {
                     Image(systemName: "plus")
                 }
             }
