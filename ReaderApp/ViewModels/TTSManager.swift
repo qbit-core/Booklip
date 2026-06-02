@@ -17,6 +17,7 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     var availableVoices: [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.hasPrefix("en") || $0.language.hasPrefix("ko") }
             .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
     }
 
