@@ -15,10 +15,24 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     private let synthesizer = AVSpeechSynthesizer()
 
+    // Chunked playback state
+    private var chunks: [String] = []
+    private var currentChunkIndex = 0
+
+    // Max characters per utterance — keeps AVSpeechSynthesizer stable
+    private let maxChunkSize = 500
+
     var availableVoices: [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
-            .filter { $0.language.hasPrefix("en") || $0.language.hasPrefix("ko") }
-            .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
+            .filter { voice in
+                    let lang = voice.language.lowercased()
+                    let name = voice.name.lowercased()
+                    
+                    return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
+                            (name.contains("yuna") || name.contains("eddy") ||
+                             name.contains("flo") || name.contains("samantha"))
+                }
+                .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
     }
 
     var selectedVoice: AVSpeechSynthesisVoice? {
@@ -34,16 +48,14 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 #endif
     }
 
+    // MARK: - Public API
+
     func speak(text: String, from offset: Int = 0) {
         synthesizer.stopSpeaking(at: .immediate)
-        let chunk = String(text.dropFirst(max(0, offset)))
-        guard !chunk.isEmpty else { return }
-        let utterance = AVSpeechUtterance(string: chunk)
-        utterance.voice = selectedVoice
-        utterance.rate = rate
-        utterance.pitchMultiplier = pitch
-        synthesizer.speak(utterance)
-        isPlaying = true
+        let remaining = String(text.dropFirst(max(0, min(offset, text.count))))
+        chunks = split(remaining)
+        currentChunkIndex = 0
+        speakCurrentChunk()
     }
 
     func pause() {
@@ -59,6 +71,8 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
+        chunks = []
+        currentChunkIndex = 0
         isPlaying = false
     }
 
@@ -72,10 +86,56 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    // MARK: - Chunking
+
+    /// Splits text at paragraph/sentence boundaries into ≤ maxChunkSize pieces.
+    private func split(_ text: String) -> [String] {
+        var result: [String] = []
+        // Split at paragraph boundaries first
+        let paragraphs = text.components(separatedBy: "\n\n")
+        for para in paragraphs where !para.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if para.count <= maxChunkSize {
+                result.append(para)
+            } else {
+                // Further split long paragraphs at sentence endings
+                var current = ""
+                for sentence in para.components(separatedBy: CharacterSet(charactersIn: ".!?\n")) {
+                    let trimmed = sentence.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty else { continue }
+                    if current.count + trimmed.count + 2 > maxChunkSize {
+                        if !current.isEmpty { result.append(current) }
+                        current = trimmed
+                    } else {
+                        current += (current.isEmpty ? "" : ". ") + trimmed
+                    }
+                }
+                if !current.isEmpty { result.append(current) }
+            }
+        }
+        return result.isEmpty ? [text] : result
+    }
+
+    private func speakCurrentChunk() {
+        guard currentChunkIndex < chunks.count else {
+            isPlaying = false
+            return
+        }
+        let text = chunks[currentChunkIndex]
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = selectedVoice
+        utterance.rate = rate
+        utterance.pitchMultiplier = pitch
+        synthesizer.speak(utterance)
+        isPlaying = true
+    }
+
     // MARK: - AVSpeechSynthesizerDelegate
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor [self] in isPlaying = false }
+        Task { @MainActor [self] in
+            currentChunkIndex += 1
+            speakCurrentChunk()
+        }
     }
 }
