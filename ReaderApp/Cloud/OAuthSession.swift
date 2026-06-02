@@ -40,6 +40,15 @@ enum OAuthSession {
         redirectURI: String,
         scopes: [String]
     ) async throws -> Token {
+        // Guard against unconfigured placeholders so we fail with a clear
+        // message instead of crashing on a force-unwrap.
+        guard !clientID.isEmpty, !clientID.hasPrefix("YOUR_") else {
+            throw OAuthError.notConfigured
+        }
+        guard let scheme = URL(string: redirectURI)?.scheme, !redirectURI.contains("YOUR_") else {
+            throw OAuthError.notConfigured
+        }
+
         let state = UUID().uuidString
         var components = URLComponents(url: authURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
@@ -50,11 +59,12 @@ enum OAuthSession {
             .init(name: "state",         value: state),
             .init(name: "response_mode", value: "query"),
         ]
+        guard let authRequestURL = components.url else { throw OAuthError.notConfigured }
 
         let callbackURL = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             let session = ASWebAuthenticationSession(
-                url: components.url!,
-                callbackURLScheme: URL(string: redirectURI)!.scheme
+                url: authRequestURL,
+                callbackURLScheme: scheme
             ) { url, error in
                 if let url { cont.resume(returning: url) }
                 else { cont.resume(throwing: error ?? OAuthError.cancelled) }
@@ -117,13 +127,14 @@ enum OAuthSession {
 }
 
 enum OAuthError: LocalizedError {
-    case cancelled, noCode, noRefreshToken, badResponse
+    case cancelled, noCode, noRefreshToken, badResponse, notConfigured
     var errorDescription: String? {
         switch self {
         case .cancelled:       return "Authentication was cancelled."
         case .noCode:          return "No authorization code returned."
         case .noRefreshToken:  return "No refresh token — please sign in again."
         case .badResponse:     return "Unexpected response from auth server."
+        case .notConfigured:   return "Cloud service not configured. Add your client ID and redirect URI in CloudConfig.swift."
         }
     }
 }
