@@ -21,6 +21,6 @@ enum CloudConfig {
     static let oneDriveRedirectURI = "readerapp://auth/onedrive"
 
     // Google Drive
-    static let googleClientID     = "YOUR_GOOGLE_CLIENT_ID"   // ends in .apps.googleusercontent.com
-    static let googleRedirectURI  = "com.googleusercontent.apps.YOUR_REVERSED_CLIENT_ID:/oauth2redirect"
+    static let googleClientID     = "157712219209-5bgl7747tqfi85q082ch6si7gcth7hi8.apps.googleusercontent.com"   // ends in .apps.googleusercontent.com
+    static let googleRedirectURI  = "com.googleusercontent.apps.157712219209-5bgl7747tqfi85q082ch6si7gcth7hi8:/oauth2redirect"
 }
