@@ -1,8 +1,28 @@
 import AuthenticationServices
 import Foundation
 
+/// Provides the window anchor for ASWebAuthenticationSession.
+/// Kept as a separate @MainActor NSObject so OAuthSession itself
+/// need not adopt the @MainActor-isolated presentation protocol.
+@MainActor
+final class AuthPresentationProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    static let shared = AuthPresentationProvider()
+    var activeSession: ASWebAuthenticationSession?
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+#if os(iOS)
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
+#else
+        NSApplication.shared.windows.first ?? ASPresentationAnchor()
+#endif
+    }
+}
+
 /// Lightweight OAuth 2.0 helper using ASWebAuthenticationSession.
-final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+enum OAuthSession {
     struct Token: Codable {
         var accessToken: String
         var refreshToken: String?
@@ -10,13 +30,7 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
         var isExpired: Bool { Date() >= expiresAt }
     }
 
-    // MARK: - Singleton for presentation context
-
-    static let shared = OAuthSession()
-    private var activeSession: ASWebAuthenticationSession?
-
-    // MARK: - Authorization Code Flow
-    // Must be called from @MainActor — ASWebAuthenticationSession requires it.
+    // MARK: - Authorization Code Flow (main thread — ASWebAuthenticationSession requires it)
 
     @MainActor
     static func authorize(
@@ -46,9 +60,9 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
                 else { cont.resume(throwing: error ?? OAuthError.cancelled) }
             }
             session.prefersEphemeralWebBrowserSession = false
-            session.presentationContextProvider = OAuthSession.shared
+            session.presentationContextProvider = AuthPresentationProvider.shared
             session.start()
-            OAuthSession.shared.activeSession = session
+            AuthPresentationProvider.shared.activeSession = session
         }
 
         guard let code = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
@@ -58,7 +72,7 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
         return try await exchangeCode(code, tokenURL: tokenURL, clientID: clientID, redirectURI: redirectURI)
     }
 
-    // MARK: - Token Exchange (nonisolated — pure networking)
+    // MARK: - Token Exchange (pure networking)
 
     static func exchangeCode(_ code: String, tokenURL: URL, clientID: String, redirectURI: String) async throws -> Token {
         var req = URLRequest(url: tokenURL)
@@ -99,17 +113,6 @@ final class OAuthSession: NSObject, ASWebAuthenticationPresentationContextProvid
         let expires = (json["expires_in"] as? TimeInterval)
             .map { Date().addingTimeInterval($0) } ?? Date().addingTimeInterval(3600)
         return Token(accessToken: access, refreshToken: json["refresh_token"] as? String, expiresAt: expires)
-    }
-
-    nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-#if os(iOS)
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
-#else
-        NSApplication.shared.windows.first ?? ASPresentationAnchor()
-#endif
     }
 }
 

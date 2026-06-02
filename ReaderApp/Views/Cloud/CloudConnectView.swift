@@ -86,11 +86,14 @@ struct CloudConnectView: View {
                 }
             }
         }
+        .frame(minWidth: 480, minHeight: 360)
         .sheet(isPresented: $showOneDriveBrowser) {
             CloudFileBrowserView(title: "OneDrive", service: oneDrive, onImport: onImport)
+                .frame(minWidth: 500, minHeight: 500)
         }
         .sheet(isPresented: $showGoogleBrowser) {
             CloudFileBrowserView(title: "Google Drive", service: googleDrive, onImport: onImport)
+                .frame(minWidth: 500, minHeight: 500)
         }
     }
 }
