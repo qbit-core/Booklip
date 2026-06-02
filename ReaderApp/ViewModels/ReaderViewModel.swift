@@ -2,7 +2,7 @@ import SwiftUI
 import Combine
 import PDFKit
 
-// Sendable struct — completely nonisolated, safe to use in Task.detached
+// Sendable struct — completely nonisolated, safe to use off the main actor.
 private struct BookLoader: Sendable {
     let url: URL
     let format: BookFormat
@@ -51,16 +51,27 @@ class ReaderViewModel: ObservableObject {
         let format = book.format
         print("[ReaderVM] load format=\(format) exists=\(FileManager.default.fileExists(atPath: fileURL.path))")
 
+        // Use a continuation so the background work runs at the same QoS
+        // as the caller (user-interactive), avoiding priority inversion.
         do {
             if format == .pdf {
-                pdfDocument = await Task.detached(priority: .userInitiated) {
-                    PDFDocument(url: fileURL)
-                }.value
+                let doc: PDFDocument? = try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .userInteractive).async {
+                        continuation.resume(returning: PDFDocument(url: fileURL))
+                    }
+                }
+                pdfDocument = doc
             } else {
                 let loader = BookLoader(url: fileURL, format: format)
-                let (text, attr) = try await Task.detached(priority: .userInitiated) {
-                    try loader.load()
-                }.value
+                let (text, attr): (String, AttributedString) = try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .userInteractive).async {
+                        do {
+                            continuation.resume(returning: try loader.load())
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
                 plainText = text
                 attributedText = attr
             }
