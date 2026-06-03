@@ -220,32 +220,17 @@ private struct FoldersView: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
-                ForEach(library.folders) { folder in
-                    NavigationLink(destination: FolderDetailView(folder: folder)) {
-                        FolderCard(folder: folder, count: library.books(in: folder).count)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button { folderToRename = folder; renameText = folder.name } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) { library.deleteFolder(folder) } label: {
-                            Label("Delete Folder", systemImage: "trash")
-                        }
-                    }
+            if let minWidth = library.viewMode.minCellWidth {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 16)], spacing: 16) {
+                    folderItems(asRow: false)
                 }
-
-                if !library.unfolderedBooks.isEmpty {
-                    NavigationLink(destination: UnfiledBooksView()) {
-                        FolderCard(folder: BookFolder(name: "Unfiled"),
-                                   count: library.unfolderedBooks.count,
-                                   systemIcon: "tray")
-                    }
-                    .buttonStyle(.plain)
+                .padding()
+            } else {
+                LazyVStack(spacing: 8) {
+                    folderItems(asRow: true)
                 }
+                .padding()
             }
-            .padding()
         }
         .overlay {
             if library.folders.isEmpty && library.unfolderedBooks.isEmpty {
@@ -265,6 +250,40 @@ private struct FoldersView: View {
                 folderToRename = nil
             }
             Button("Cancel", role: .cancel) { folderToRename = nil }
+        }
+    }
+
+    @ViewBuilder
+    private func folderItems(asRow: Bool) -> some View {
+        ForEach(library.folders) { folder in
+            NavigationLink(destination: FolderDetailView(folder: folder)) {
+                if asRow {
+                    FolderRow(name: folder.name, count: library.books(in: folder).count, icon: "folder.fill")
+                } else {
+                    FolderCard(folder: folder, count: library.books(in: folder).count)
+                }
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button { folderToRename = folder; renameText = folder.name } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button(role: .destructive) { library.deleteFolder(folder) } label: {
+                    Label("Delete Folder", systemImage: "trash")
+                }
+            }
+        }
+
+        if !library.unfolderedBooks.isEmpty {
+            NavigationLink(destination: UnfiledBooksView()) {
+                if asRow {
+                    FolderRow(name: "Unfiled", count: library.unfolderedBooks.count, icon: "tray")
+                } else {
+                    FolderCard(folder: BookFolder(name: "Unfiled"),
+                               count: library.unfolderedBooks.count, systemIcon: "tray")
+                }
+            }
+            .buttonStyle(.plain)
         }
     }
 }
@@ -388,6 +407,32 @@ private struct BookRow: View {
 }
 
 // MARK: - FolderCard
+
+private struct FolderRow: View {
+    let name: String
+    let count: Int
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text("\(count) book\(count == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
 
 private struct FolderCard: View {
     let folder: BookFolder
