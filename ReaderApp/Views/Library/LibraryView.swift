@@ -32,7 +32,7 @@ struct LibraryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if library.isSelecting { selectionBar }
+                if library.isSelecting { SelectionBar() }
             }
             .navigationTitle("Library")
             .toolbar { toolbarContent }
@@ -122,15 +122,18 @@ struct LibraryView: View {
         }
     }
 
-    // MARK: - Selection action bar
+}
 
-    private var selectionBar: some View {
+// MARK: - Selection action bar (shared)
+
+struct SelectionBar: View {
+    @EnvironmentObject private var library: LibraryViewModel
+
+    var body: some View {
         HStack(spacing: 16) {
             Text("\(library.selectedBookIDs.count) selected")
                 .font(.subheadline.weight(.medium))
-
             Spacer()
-
             Menu {
                 Button("No Folder") { library.moveSelected(to: nil) }
                 if !library.folders.isEmpty { Divider() }
@@ -142,9 +145,7 @@ struct LibraryView: View {
             }
             .disabled(library.selectedBookIDs.isEmpty)
 
-            Button(role: .destructive) {
-                library.deleteSelected()
-            } label: {
+            Button(role: .destructive) { library.deleteSelected() } label: {
                 Label("Delete", systemImage: "trash")
             }
             .disabled(library.selectedBookIDs.isEmpty)
@@ -153,6 +154,34 @@ struct LibraryView: View {
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
     }
+}
+
+// MARK: - Reusable selection toolbar + bar (for folder detail / unfiled)
+
+struct BookSelectionModifier: ViewModifier {
+    @EnvironmentObject private var library: LibraryViewModel
+
+    func body(content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .bottom) {
+                if library.isSelecting { SelectionBar() }
+            }
+            .toolbar {
+                ToolbarItem(placement: .platformTrailing) {
+                    if library.isSelecting {
+                        Button("Done") { library.setSelecting(false) }
+                    } else {
+                        Button { library.setSelecting(true) } label: {
+                            Image(systemName: "checkmark.circle")
+                        }
+                    }
+                }
+            }
+    }
+}
+
+extension View {
+    func bookSelection() -> some View { modifier(BookSelectionModifier()) }
 }
 
 // MARK: - Shared books collection (grid or list, with selection)
@@ -304,6 +333,7 @@ struct FolderDetailView: View {
             }
         }
         .navigationTitle(folder.name)
+        .bookSelection()
     }
 }
 
@@ -312,6 +342,7 @@ struct UnfiledBooksView: View {
     var body: some View {
         BooksCollection(books: library.unfolderedBooks)
             .navigationTitle("Unfiled")
+            .bookSelection()
     }
 }
 
