@@ -200,7 +200,9 @@ struct EPUBParser: BookParser, Sendable {
 
 // XMLParser delegate for the OPF package document — robust to attribute
 // order and namespace prefixes (dc:title, opf:item, etc.).
-private final class OPFDelegate: NSObject, XMLParserDelegate {
+// `nonisolated` opts the whole type out of the project's default main-actor
+// isolation so it can run inside the nonisolated background parser.
+nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
     var title = ""
     var creator = ""
     var manifest: [String: String] = [:]   // id → href
