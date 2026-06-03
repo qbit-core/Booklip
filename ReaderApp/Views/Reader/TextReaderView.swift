@@ -202,7 +202,13 @@ struct NativeTextView: UIViewRepresentable {
             context.coordinator.lastContentKey = contentKey
         }
 
-        context.coordinator.restoreProgressIfNeeded(progress, in: textView)
+        // Sync scroll to progress (initial restore + seeking from the progress bar).
+        // Defer once so content layout has settled and contentSize is valid.
+        let target = progress
+        context.coordinator.syncProgress(target, in: textView)
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            coordinator?.syncProgress(target, in: textView)
+        }
 
         // TTS highlight + auto-scroll
         let highlight = UIColor(settings.currentPreset.text).withAlphaComponent(0.18)
@@ -240,7 +246,7 @@ struct NativeTextView: UIViewRepresentable {
         var isScrollingProgrammatically = false
         var lastStyleKey = ""
         var lastContentKey = ""
-        private var didRestoreProgress = false
+        private var lastReportedProgress: Double?   // last value WE pushed from scrolling
         private var lastHighlight: NSRange?
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
@@ -273,13 +279,17 @@ struct NativeTextView: UIViewRepresentable {
             }
         }
 
-        // Restore saved reading position once, after layout has a content size.
-        func restoreProgressIfNeeded(_ target: Double, in textView: UITextView) {
-            guard !didRestoreProgress else { return }
+        // Scroll the text to match an externally-set progress value — used for
+        // the initial position restore and for seeking via the progress bar.
+        // Skips changes that originated from our own scroll reporting so it
+        // never fights the user's manual scrolling.
+        func syncProgress(_ target: Double, in textView: UITextView) {
             let scrollable = textView.contentSize.height - textView.bounds.height
-            guard scrollable > 0 else { return }   // wait until laid out
-            didRestoreProgress = true
-            guard target > 0 else { return }
+            guard scrollable > 0 else { return }   // not laid out yet
+            // This value came from our own scroll → don't bounce back
+            if let lr = lastReportedProgress, abs(lr - target) < 0.0015 { return }
+            let current = textView.contentOffset.y / scrollable
+            guard abs(current - target) > 0.003 else { return }
             isScrollingProgrammatically = true
             textView.setContentOffset(CGPoint(x: 0, y: target * scrollable), animated: false)
             isScrollingProgrammatically = false
@@ -303,7 +313,9 @@ struct NativeTextView: UIViewRepresentable {
             guard !isScrollingProgrammatically else { return }
             let scrollable = scrollView.contentSize.height - scrollView.bounds.height
             guard scrollable > 0 else { return }
-            progress = max(0, min(scrollView.contentOffset.y / scrollable, 1))
+            let value = max(0, min(scrollView.contentOffset.y / scrollable, 1))
+            lastReportedProgress = value   // remember so syncProgress won't bounce back
+            progress = value
         }
 
         @objc func handleTap() { onTap() }
