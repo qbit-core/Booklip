@@ -23,11 +23,18 @@ private extension Color {
     }
 }
 
+enum PageEffect: String, CaseIterable, Identifiable {
+    case verticalSlide = "Vertical Slide"
+    case paper         = "Paper Book"
+    var id: String { rawValue }
+}
+
 class ReadingSettings: ObservableObject {
     @Published var fontName:    String = UserDefaults.standard.string(forKey: "fontName")    ?? "Georgia" { didSet { UserDefaults.standard.set(fontName,    forKey: "fontName") } }
     @Published var fontSize:    Double = UserDefaults.standard.double(forKey: "fontSize").nonZero ?? 18.0   { didSet { UserDefaults.standard.set(fontSize,    forKey: "fontSize") } }
     @Published var lineSpacing: Double = UserDefaults.standard.double(forKey: "lineSpacing").nonZero ?? 8.0 { didSet { UserDefaults.standard.set(lineSpacing, forKey: "lineSpacing") } }
     @Published var presetId:    String = UserDefaults.standard.string(forKey: "presetId")    ?? "default" { didSet { UserDefaults.standard.set(presetId,    forKey: "presetId") } }
+    @Published var pageEffect:  PageEffect = PageEffect(rawValue: UserDefaults.standard.string(forKey: "pageEffect") ?? "") ?? .verticalSlide { didSet { UserDefaults.standard.set(pageEffect.rawValue, forKey: "pageEffect") } }
 
     var currentPreset: ColorPreset {
         ColorPreset.all.first { $0.id == presetId } ?? ColorPreset.all[0]

@@ -16,6 +16,7 @@ struct TextReaderView: View {
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
             blocks: richBlocks,
             settings: settings,
+            pageEffect: settings.pageEffect,
             progress: $vm.progress,
             spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() }
@@ -33,6 +34,7 @@ struct NativeTextView: NSViewRepresentable {
     let attributedText: AttributedString?
     var blocks: [ContentBlock] = []
     let settings: ReadingSettings
+    var pageEffect: PageEffect = .verticalSlide
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -192,6 +194,7 @@ struct NativeTextView: UIViewRepresentable {
     let attributedText: AttributedString?
     var blocks: [ContentBlock] = []
     let settings: ReadingSettings
+    var pageEffect: PageEffect = .verticalSlide
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -221,6 +224,7 @@ struct NativeTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
+        context.coordinator.pageEffect = pageEffect
         // Only restyle when text/style actually change — never on the frequent
         // progress updates that scrolling produces.
         let styleKey = "\(settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)"
@@ -319,6 +323,7 @@ struct NativeTextView: UIViewRepresentable {
         var lastContentKey = ""
         private var lastReportedProgress: Double?   // last value WE pushed from scrolling
         private var lastHighlight: NSRange?
+        var pageEffect: PageEffect = .verticalSlide
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
             _progress = progress
@@ -415,8 +420,23 @@ struct NativeTextView: UIViewRepresentable {
             let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
             let target = min(max(0, tv.contentOffset.y + (forward ? step : -step)), maxOffset)
             guard abs(target - tv.contentOffset.y) > 1 else { return }
-            isScrollingProgrammatically = true   // cleared in didEndScrollingAnimation
-            tv.setContentOffset(CGPoint(x: 0, y: target), animated: true)
+
+            switch pageEffect {
+            case .verticalSlide:
+                isScrollingProgrammatically = true   // cleared in didEndScrollingAnimation
+                tv.setContentOffset(CGPoint(x: 0, y: target), animated: true)
+
+            case .paper:
+                // Real UIKit page-curl: curl up when reading forward, down when going back.
+                isScrollingProgrammatically = true
+                let option: UIView.AnimationOptions = forward ? .transitionCurlUp : .transitionCurlDown
+                UIView.transition(with: tv, duration: 0.45, options: option, animations: {
+                    tv.contentOffset = CGPoint(x: 0, y: target)
+                }, completion: { _ in
+                    self.isScrollingProgrammatically = false
+                    self.commitProgress(tv)
+                })
+            }
         }
     }
 }

@@ -42,6 +42,16 @@ struct AppearancePanel: View {
                         LabeledSlider(value: $settings.lineSpacing, range: 0...24, unit: "pt")
                     }
 
+                    // Page turn effect
+                    PanelSection(title: "Page Turn") {
+                        Picker("Page Turn", selection: $settings.pageEffect) {
+                            ForEach(PageEffect.allCases) { effect in
+                                Text(effect.rawValue).tag(effect)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
                     // Preview
                     PanelSection(title: "Preview") {
                         Text("The quick brown fox jumps over the lazy dog.")
