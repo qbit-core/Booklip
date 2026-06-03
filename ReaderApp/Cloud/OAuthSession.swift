@@ -1,5 +1,28 @@
 import AuthenticationServices
+import CryptoKit
 import Foundation
+
+// MARK: - PKCE
+
+private enum PKCE {
+    static func makeVerifier() -> String {
+        var bytes = [UInt8](repeating: 0, count: 64)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return base64URL(Data(bytes))
+    }
+
+    static func challenge(for verifier: String) -> String {
+        let hash = SHA256.hash(data: Data(verifier.utf8))
+        return base64URL(Data(hash))
+    }
+
+    static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
 
 /// Provides the window anchor for ASWebAuthenticationSession.
 /// Kept as a separate @MainActor NSObject so OAuthSession itself
@@ -50,15 +73,22 @@ enum OAuthSession {
         }
 
         let state = UUID().uuidString
+        let verifier = PKCE.makeVerifier()
+        let challenge = PKCE.challenge(for: verifier)
+
         var components = URLComponents(url: authURL, resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            .init(name: "client_id",     value: clientID),
-            .init(name: "response_type", value: "code"),
-            .init(name: "redirect_uri",  value: redirectURI),
-            .init(name: "scope",         value: scopes.joined(separator: " ")),
-            .init(name: "state",         value: state),
-            .init(name: "response_mode", value: "query"),
-        ]
+        // Preserve any query items already on authURL (e.g. Dropbox token_access_type)
+        var items = components.queryItems ?? []
+        items.append(contentsOf: [
+            .init(name: "client_id",             value: clientID),
+            .init(name: "response_type",         value: "code"),
+            .init(name: "redirect_uri",          value: redirectURI),
+            .init(name: "scope",                 value: scopes.joined(separator: " ")),
+            .init(name: "state",                 value: state),
+            .init(name: "code_challenge",        value: challenge),
+            .init(name: "code_challenge_method", value: "S256"),
+        ])
+        components.queryItems = items
         guard let authRequestURL = components.url else { throw OAuthError.notConfigured }
 
         let callbackURL = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
@@ -79,20 +109,23 @@ enum OAuthSession {
             .queryItems?.first(where: { $0.name == "code" })?.value
         else { throw OAuthError.noCode }
 
-        return try await exchangeCode(code, tokenURL: tokenURL, clientID: clientID, redirectURI: redirectURI)
+        return try await exchangeCode(code, tokenURL: tokenURL, clientID: clientID,
+                                      redirectURI: redirectURI, codeVerifier: verifier)
     }
 
     // MARK: - Token Exchange (pure networking)
 
-    static func exchangeCode(_ code: String, tokenURL: URL, clientID: String, redirectURI: String) async throws -> Token {
+    static func exchangeCode(_ code: String, tokenURL: URL, clientID: String,
+                             redirectURI: String, codeVerifier: String) async throws -> Token {
         var req = URLRequest(url: tokenURL)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         let body = [
-            "grant_type":  "authorization_code",
-            "code":         code,
-            "client_id":    clientID,
-            "redirect_uri": redirectURI,
+            "grant_type":    "authorization_code",
+            "code":           code,
+            "client_id":      clientID,
+            "redirect_uri":   redirectURI,
+            "code_verifier":  codeVerifier,
         ].map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" }
          .joined(separator: "&")
         req.httpBody = body.data(using: .utf8)
