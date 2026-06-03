@@ -259,21 +259,27 @@ struct NativeTextView: UIViewRepresentable {
 
         // EPUB with images: build a rich NSAttributedString from blocks
         if !blocks.isEmpty {
-            let maxWidth = textView.bounds.width - textView.textContainerInset.left - textView.textContainerInset.right - 10
+            // textView may not be laid out yet → fall back to the screen width
+            let insets = textView.textContainerInset.left + textView.textContainerInset.right + 10
+            let laidOutWidth = textView.bounds.width - insets
+            let available = laidOutWidth > 50 ? laidOutWidth
+                : (UIScreen.main.bounds.width - 40)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle
             ]
+            var imageCount = 0, decoded = 0
             let result = NSMutableAttributedString()
             for block in blocks {
                 switch block {
                 case .text(let s):
                     result.append(NSAttributedString(string: s + "\n\n", attributes: attrs))
                 case .image(let data):
+                    imageCount += 1
                     if let image = UIImage(data: data) {
+                        decoded += 1
                         let attachment = NSTextAttachment()
                         attachment.image = image
-                        let w = max(1, maxWidth)
-                        let scale = min(1, w / max(image.size.width, 1))
+                        let scale = min(1, available / max(image.size.width, 1))
                         attachment.bounds = CGRect(x: 0, y: 0,
                                                    width: image.size.width * scale,
                                                    height: image.size.height * scale)
@@ -282,6 +288,7 @@ struct NativeTextView: UIViewRepresentable {
                     }
                 }
             }
+            print("[EPUB] render: \(blocks.count) blocks, \(imageCount) images, \(decoded) decoded, width=\(available)")
             textView.attributedText = result
             return
         }
