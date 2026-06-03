@@ -18,6 +18,7 @@ struct EPUBParser: BookParser, Sendable {
 
         let opfBase = (opfPath as NSString).deletingLastPathComponent
         let (title, author, spineHrefs) = try parseOPF(opfXML, base: opfBase)
+        print("[EPUB] opfPath=\(opfPath) base=\(opfBase) spine=\(spineHrefs.count) first=\(spineHrefs.prefix(3))")
 
         var fullText = ""
         var blocks: [ContentBlock] = []
@@ -130,27 +131,24 @@ struct EPUBParser: BookParser, Sendable {
     }
 
     nonisolated private func parseOPF(_ xml: String, base: String) throws -> (title: String, author: String, hrefs: [String]) {
-        let title  = extractTag("dc:title", from: xml) ?? extractTag("title", from: xml) ?? "Unknown"
-        let author = extractTag("dc:creator", from: xml) ?? "Unknown"
+        guard let data = xml.data(using: .utf8) else { throw EPUBError.malformedContainer }
+        let delegate = OPFDelegate()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        parser.parse()
 
-        // Build id→href manifest map
-        var manifest: [String: String] = [:]
-        let manifestPattern = #"<item[^>]+id="([^"]*)"[^>]+href="([^"]*)"[^>]*/>"#
-        for match in allMatches(of: manifestPattern, in: xml) {
-            let groups = captureGroups(of: manifestPattern, in: match)
-            if groups.count >= 2 { manifest[groups[0]] = groups[1] }
-        }
-
-        // Extract spine order
-        var hrefs: [String] = []
-        let spinePattern = #"<itemref[^>]+idref="([^"]*)"[^>]*/>"#
-        for match in allMatches(of: spinePattern, in: xml) {
-            let groups = captureGroups(of: spinePattern, in: match)
-            if let id = groups.first, let href = manifest[id] {
-                hrefs.append(href)
+        // Map spine idrefs → manifest hrefs (in reading order).
+        var hrefs = delegate.spine.compactMap { delegate.manifest[$0] }
+        // Fallback: if no spine, use all (x)html manifest items in document order.
+        if hrefs.isEmpty {
+            hrefs = delegate.manifestOrder.compactMap { id in
+                guard let href = delegate.manifest[id] else { return nil }
+                let lower = href.lowercased()
+                return (lower.hasSuffix(".html") || lower.hasSuffix(".xhtml") || lower.hasSuffix(".htm")) ? href : nil
             }
         }
-
+        let title  = delegate.title.isEmpty  ? "Unknown" : delegate.title
+        let author = delegate.creator.isEmpty ? "Unknown" : delegate.creator
         return (title, author, hrefs)
     }
 
@@ -197,6 +195,52 @@ struct EPUBParser: BookParser, Sendable {
         // Collapse excess blank lines
         text = text.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// XMLParser delegate for the OPF package document — robust to attribute
+// order and namespace prefixes (dc:title, opf:item, etc.).
+private final class OPFDelegate: NSObject, XMLParserDelegate {
+    var title = ""
+    var creator = ""
+    var manifest: [String: String] = [:]   // id → href
+    var manifestOrder: [String] = []        // manifest ids in document order
+    var spine: [String] = []                // idrefs in reading order
+
+    private var capturing: String?          // "title" or "creator"
+    private var buffer = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?,
+                attributes attributeDict: [String: String]) {
+        let local = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
+        switch local {
+        case "item":
+            if let id = attributeDict["id"], let href = attributeDict["href"] {
+                manifest[id] = href
+                manifestOrder.append(id)
+            }
+        case "itemref":
+            if let idref = attributeDict["idref"] { spine.append(idref) }
+        case "title", "creator":
+            capturing = local
+            buffer = ""
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if capturing != nil { buffer += string }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?) {
+        let local = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
+        let value = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if local == "title", title.isEmpty, !value.isEmpty { title = value }
+        if local == "creator", creator.isEmpty, !value.isEmpty { creator = value }
+        if local == capturing { capturing = nil; buffer = "" }
     }
 }
 
