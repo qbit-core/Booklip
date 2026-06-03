@@ -44,11 +44,33 @@ class ReadingSettings: ObservableObject {
         Font.custom(fontName, size: fontSize)
     }
 
-    static let availableFonts: [String] = [
-        "Georgia", "Times New Roman", "Palatino-Roman", "Baskerville",
-        "HelveticaNeue", "Arial", "Futura-Medium", "GillSans",
-        "AmericanTypewriter", "Courier New",
+    static let availableFonts: [FontOption] = [
+        // Latin
+        FontOption("Georgia",            "Georgia"),
+        FontOption("Times New Roman",    "Times New Roman"),
+        FontOption("Palatino",           "Palatino-Roman"),
+        FontOption("Baskerville",        "Baskerville"),
+        FontOption("Helvetica Neue",     "HelveticaNeue"),
+        FontOption("Arial",              "Arial"),
+        FontOption("Futura",             "Futura-Medium"),
+        FontOption("Gill Sans",          "GillSans"),
+        FontOption("American Typewriter","AmericanTypewriter"),
+        FontOption("Courier New",        "Courier New"),
+        // Korean (한국어)
+        FontOption("본고딕 (Apple SD Gothic Neo)", "AppleSDGothicNeo-Regular"),
+        FontOption("명조 (Apple Myungjo)",         "AppleMyungjo"),
+        FontOption("궁서 (GungSeo)",               "GungSeo"),
     ]
+}
+
+struct FontOption: Identifiable, Hashable {
+    let displayName: String
+    let fontName: String
+    var id: String { fontName }
+    init(_ displayName: String, _ fontName: String) {
+        self.displayName = displayName
+        self.fontName = fontName
+    }
 }
 
 private extension Double {

@@ -23,8 +23,10 @@ struct AppearancePanel: View {
                     // Font
                     PanelSection(title: "Font") {
                         Picker(selection: $settings.fontName, label: EmptyView()) {
-                            ForEach(ReadingSettings.availableFonts, id: \.self) { name in
-                                Text(name).font(.custom(name, size: 16)).tag(name)
+                            ForEach(ReadingSettings.availableFonts) { option in
+                                Text(option.displayName)
+                                    .font(.custom(option.fontName, size: 16))
+                                    .tag(option.fontName)
                             }
                         }
                         .pickerStyle(.menu)
@@ -54,7 +56,7 @@ struct AppearancePanel: View {
 
                     // Preview
                     PanelSection(title: "Preview") {
-                        Text("The quick brown fox jumps over the lazy dog.")
+                        Text("The quick brown fox jumps over the lazy dog.\n다람쥐 헌 쳇바퀴에 타고파.")
                             .font(settings.swiftUIFont)
                             .foregroundStyle(settings.currentPreset.text)
                             .lineSpacing(settings.lineSpacing)
