@@ -11,10 +11,15 @@ struct CloudFileBrowserView: View {
     @State private var isLoading = false
     @State private var error: String?
     @State private var folderStack: [(id: String?, name: String)] = [(nil, "Root")]
-    @State private var importingFile: CloudFile?
+
+    // Selection / import progress
+    @State private var isSelecting = false
+    @State private var selected: Set<String> = []      // file ids
+    @State private var importProgress: String?          // e.g. "Importing 2 of 5…"
 
     private var currentFolderID: String? { folderStack.last?.id ?? nil }
     private var currentFolderName: String { folderStack.last?.name ?? title }
+    private var selectableFiles: [CloudFile] { files.filter { $0.isSupportedBook } }
 
     var body: some View {
         NavigationStack {
@@ -28,49 +33,87 @@ struct CloudFileBrowserView: View {
                     ContentUnavailableView("No Supported Files", systemImage: "doc.questionmark",
                         description: Text("This folder has no .txt, .epub, .pdf, or .md files."))
                 } else {
-                    List(files) { file in
-                        fileRow(file)
-                    }
+                    List(files) { file in fileRow(file) }
                 }
             }
             .navigationTitle(currentFolderName)
             .inlineNavigationTitle()
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    if folderStack.count > 1 {
-                        Button { folderStack.removeLast(); load() } label: {
-                            Label("Back", systemImage: "chevron.left")
-                        }
-                    } else {
-                        Button("Cancel") { dismiss() }
-                    }
-                }
+            .toolbar { toolbar }
+            .safeAreaInset(edge: .bottom) {
+                if isSelecting { importBar }
             }
         }
         .task { load() }
         .overlay {
-            if importingFile != nil {
+            if let importProgress {
                 ZStack {
-                    Color.black.opacity(0.3).ignoresSafeArea()
+                    Color.black.opacity(0.35).ignoresSafeArea()
                     VStack(spacing: 12) {
                         ProgressView()
-                        Text("Importing…").foregroundStyle(.white)
+                        Text(importProgress).foregroundStyle(.white)
                     }
                 }
             }
         }
     }
 
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            if folderStack.count > 1 {
+                Button { folderStack.removeLast(); load() } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+            } else {
+                Button("Cancel") { dismiss() }
+            }
+        }
+        ToolbarItem(placement: .platformTrailing) {
+            if !selectableFiles.isEmpty {
+                Button(isSelecting ? "Done" : "Select") {
+                    isSelecting.toggle()
+                    if !isSelecting { selected.removeAll() }
+                }
+            }
+        }
+    }
+
+    private var importBar: some View {
+        HStack(spacing: 16) {
+            Text("\(selected.count) selected").font(.subheadline.weight(.medium))
+            Spacer()
+            Button {
+                selected = Set(selectableFiles.map(\.id))
+            } label: { Text("All") }
+            Button {
+                importSelected()
+            } label: {
+                Label("Import", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(selected.isEmpty)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
     private func fileRow(_ file: CloudFile) -> some View {
         Button {
-            if file.isFolder {
-                folderStack.append((file.id, file.name))
-                load()
+            if isSelecting {
+                if file.isSupportedBook { toggle(file) }
+            } else if file.isFolder {
+                folderStack.append((file.id, file.name)); load()
             } else if file.isSupportedBook {
-                importFile(file)
+                importSingle(file)
             }
         } label: {
             HStack(spacing: 12) {
+                if isSelecting && file.isSupportedBook {
+                    Image(systemName: selected.contains(file.id) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selected.contains(file.id) ? Color.accentColor : .secondary)
+                }
                 Image(systemName: file.formatIcon)
                     .foregroundStyle(file.isFolder ? .yellow : .accentColor)
                     .frame(width: 28)
@@ -84,16 +127,21 @@ struct CloudFileBrowserView: View {
                     }
                 }
                 Spacer()
-                if file.isFolder {
+                if file.isFolder && !isSelecting {
                     Image(systemName: "chevron.right").foregroundStyle(.tertiary).font(.caption)
-                } else if !file.isSupportedBook {
+                } else if !file.isSupportedBook && !file.isFolder {
                     Text("Unsupported").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!file.isSupportedBook && !file.isFolder)
+        .disabled(isSelecting ? !file.isSupportedBook : (!file.isSupportedBook && !file.isFolder))
+    }
+
+    private func toggle(_ file: CloudFile) {
+        if selected.contains(file.id) { selected.remove(file.id) }
+        else { selected.insert(file.id) }
     }
 
     private func load() {
@@ -114,20 +162,38 @@ struct CloudFileBrowserView: View {
         }
     }
 
-    private func importFile(_ file: CloudFile) {
-        importingFile = file
+    private func importSingle(_ file: CloudFile) {
+        importProgress = "Importing…"
         Task {
             do {
                 let url = try await service.download(file)
-                await MainActor.run {
-                    onImport(url)
-                    importingFile = nil
-                    dismiss()
-                }
+                await MainActor.run { onImport(url); importProgress = nil; dismiss() }
             } catch {
-                await MainActor.run {
-                    self.error = error.localizedDescription
-                    importingFile = nil
+                await MainActor.run { self.error = error.localizedDescription; importProgress = nil }
+            }
+        }
+    }
+
+    private func importSelected() {
+        let toImport = selectableFiles.filter { selected.contains($0.id) }
+        guard !toImport.isEmpty else { return }
+        Task {
+            var failures = 0
+            for (index, file) in toImport.enumerated() {
+                await MainActor.run { importProgress = "Importing \(index + 1) of \(toImport.count)…" }
+                do {
+                    let url = try await service.download(file)
+                    await MainActor.run { onImport(url) }
+                } catch {
+                    failures += 1
+                }
+            }
+            await MainActor.run {
+                importProgress = nil
+                if failures > 0 {
+                    error = "\(failures) of \(toImport.count) file(s) failed to import."
+                } else {
+                    dismiss()
                 }
             }
         }
