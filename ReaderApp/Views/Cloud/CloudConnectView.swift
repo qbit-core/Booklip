@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CloudConnectView: View {
     @StateObject private var oneDrive = OneDriveService()
@@ -8,35 +9,40 @@ struct CloudConnectView: View {
 
     @State private var showOneDriveBrowser = false
     @State private var showGoogleBrowser   = false
+    @State private var showICloudPicker    = false
 
     var body: some View {
         NavigationStack {
             List {
+                // iCloud Drive — available through the system document picker, no sign-in
+                Section {
+                    CloudServiceRow(
+                        iconColor: .cyan,
+                        name: "iCloud Drive",
+                        status: "Available",
+                        statusColor: .green,
+                        isConnected: true,
+                        primaryTitle: "Browse",
+                        onPrimary: { showICloudPicker = true },
+                        onSignOut: nil
+                    )
+                }
+
                 // OneDrive
                 Section {
-                    HStack {
-                        Image(systemName: "cloud.fill")
-                            .foregroundStyle(.blue)
-                            .frame(width: 32)
-                        VStack(alignment: .leading) {
-                            Text("OneDrive")
-                                .font(.headline)
-                            Text(oneDrive.isSignedIn ? "Connected" : "Not connected")
-                                .font(.caption)
-                                .foregroundStyle(oneDrive.isSignedIn ? .green : .secondary)
-                        }
-                        Spacer()
-                        if oneDrive.isSignedIn {
-                            Button("Browse") { showOneDriveBrowser = true }
-                                .buttonStyle(.borderedProminent)
-                            Button("Sign Out") { oneDrive.signOut() }
-                                .foregroundStyle(.red)
-                        } else {
-                            Button("Connect") { Task { await oneDrive.signIn() } }
-                                .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    CloudServiceRow(
+                        iconColor: .blue,
+                        name: "OneDrive",
+                        status: oneDrive.isSignedIn ? "Connected" : "Not connected",
+                        statusColor: oneDrive.isSignedIn ? .green : .secondary,
+                        isConnected: oneDrive.isSignedIn,
+                        primaryTitle: oneDrive.isSignedIn ? "Browse" : "Connect",
+                        onPrimary: {
+                            if oneDrive.isSignedIn { showOneDriveBrowser = true }
+                            else { Task { await oneDrive.signIn() } }
+                        },
+                        onSignOut: oneDrive.isSignedIn ? { oneDrive.signOut() } : nil
+                    )
                     if let e = oneDrive.error {
                         Text(e).font(.caption).foregroundStyle(.red)
                     }
@@ -44,36 +50,26 @@ struct CloudConnectView: View {
 
                 // Google Drive
                 Section {
-                    HStack {
-                        Image(systemName: "cloud.fill")
-                            .foregroundStyle(.red)
-                            .frame(width: 32)
-                        VStack(alignment: .leading) {
-                            Text("Google Drive")
-                                .font(.headline)
-                            Text(googleDrive.isSignedIn ? "Connected" : "Not connected")
-                                .font(.caption)
-                                .foregroundStyle(googleDrive.isSignedIn ? .green : .secondary)
-                        }
-                        Spacer()
-                        if googleDrive.isSignedIn {
-                            Button("Browse") { showGoogleBrowser = true }
-                                .buttonStyle(.borderedProminent)
-                            Button("Sign Out") { googleDrive.signOut() }
-                                .foregroundStyle(.red)
-                        } else {
-                            Button("Connect") { Task { await googleDrive.signIn() } }
-                                .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    CloudServiceRow(
+                        iconColor: .red,
+                        name: "Google Drive",
+                        status: googleDrive.isSignedIn ? "Connected" : "Not connected",
+                        statusColor: googleDrive.isSignedIn ? .green : .secondary,
+                        isConnected: googleDrive.isSignedIn,
+                        primaryTitle: googleDrive.isSignedIn ? "Browse" : "Connect",
+                        onPrimary: {
+                            if googleDrive.isSignedIn { showGoogleBrowser = true }
+                            else { Task { await googleDrive.signIn() } }
+                        },
+                        onSignOut: googleDrive.isSignedIn ? { googleDrive.signOut() } : nil
+                    )
                     if let e = googleDrive.error {
                         Text(e).font(.caption).foregroundStyle(.red)
                     }
                 }
 
                 Section {
-                    Text("Tap Connect to sign in with your account. Once connected, browse your files and tap any supported book (.txt .epub .pdf .md) to import it.")
+                    Text("Browse a connected service and tap any supported book (.txt .epub .pdf .md) to import it.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -86,7 +82,15 @@ struct CloudConnectView: View {
                 }
             }
         }
-        .frame(minWidth: 480, minHeight: 360)
+        .frame(minWidth: 480, minHeight: 380)
+        .fileImporter(isPresented: $showICloudPicker,
+                      allowedContentTypes: [.data],
+                      allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result {
+                urls.forEach { onImport($0) }
+                dismiss()
+            }
+        }
         .sheet(isPresented: $showOneDriveBrowser) {
             CloudFileBrowserView(title: "OneDrive", service: oneDrive, onImport: onImport)
                 .frame(minWidth: 500, minHeight: 500)
@@ -95,5 +99,45 @@ struct CloudConnectView: View {
             CloudFileBrowserView(title: "Google Drive", service: googleDrive, onImport: onImport)
                 .frame(minWidth: 500, minHeight: 500)
         }
+    }
+}
+
+// MARK: - Reusable service row
+
+private struct CloudServiceRow: View {
+    let iconColor: Color
+    let name: String
+    let status: String
+    let statusColor: Color
+    let isConnected: Bool
+    let primaryTitle: String
+    let onPrimary: () -> Void
+    let onSignOut: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "cloud.fill")
+                    .font(.title2)
+                    .foregroundStyle(iconColor)
+                    .frame(width: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.headline)
+                    Text(status).font(.caption).foregroundStyle(statusColor)
+                }
+                Spacer(minLength: 8)
+                Button(primaryTitle, action: onPrimary)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .fixedSize()
+            }
+            // Sign Out on its own line so it never crowds the primary button
+            if let onSignOut {
+                Button("Sign Out", role: .destructive, action: onSignOut)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
