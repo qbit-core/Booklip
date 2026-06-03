@@ -33,6 +33,6 @@ enum CloudConfig {
     static let googleRedirectURI  = "com.googleusercontent.apps.157712219209-5bgl7747tqfi85q082ch6si7gcth7hi8:/oauth2redirect"
 
     // Dropbox
-    static let dropboxClientID    = "YOUR_DROPBOX_APP_KEY"
+    static let dropboxClientID    = "btx9o6htbdzt7uo"
     static let dropboxRedirectURI = "readerapp://auth/dropbox"
 }
