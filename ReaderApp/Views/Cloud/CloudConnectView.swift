@@ -4,12 +4,13 @@ import UniformTypeIdentifiers
 struct CloudConnectView: View {
     @StateObject private var oneDrive = OneDriveService()
     @StateObject private var googleDrive = GoogleDriveService()
+    @StateObject private var dropbox = DropboxService()
     let onImport: (URL) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var showOneDriveBrowser = false
     @State private var showGoogleBrowser   = false
-    @State private var showICloudPicker    = false
+    @State private var showDropboxBrowser  = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,18 +26,24 @@ struct CloudConnectView: View {
             .padding(.vertical, 16)
 
             List {
-                // iCloud Drive — available through the system document picker, no sign-in
+                // Dropbox
                 Section {
                     CloudServiceRow(
-                        iconColor: .cyan,
-                        name: "iCloud Drive",
-                        status: "Available",
-                        statusColor: .green,
-                        isConnected: true,
-                        primaryTitle: "Browse",
-                        onPrimary: { showICloudPicker = true },
-                        onSignOut: nil
+                        iconColor: .indigo,
+                        name: "Dropbox",
+                        status: dropbox.isSignedIn ? "Connected" : "Not connected",
+                        statusColor: dropbox.isSignedIn ? .green : .secondary,
+                        isConnected: dropbox.isSignedIn,
+                        primaryTitle: dropbox.isSignedIn ? "Browse" : "Connect",
+                        onPrimary: {
+                            if dropbox.isSignedIn { showDropboxBrowser = true }
+                            else { Task { await dropbox.signIn() } }
+                        },
+                        onSignOut: dropbox.isSignedIn ? { dropbox.signOut() } : nil
                     )
+                    if let e = dropbox.error {
+                        Text(e).font(.caption).foregroundStyle(.red)
+                    }
                 }
 
                 // OneDrive
@@ -83,18 +90,15 @@ struct CloudConnectView: View {
                     Text("Browse a connected service and tap any supported book (.txt .epub .pdf .md) to import it.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
             }
             .contentMargins(.horizontal, 12, for: .scrollContent)
         }
         .cloudSheetFrame()
-        .fileImporter(isPresented: $showICloudPicker,
-                      allowedContentTypes: [.data],
-                      allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result {
-                urls.forEach { onImport($0) }
-                dismiss()
-            }
+        .sheet(isPresented: $showDropboxBrowser) {
+            CloudFileBrowserView(title: "Dropbox", service: dropbox, onImport: onImport)
+                .cloudSheetFrame()
         }
         .sheet(isPresented: $showOneDriveBrowser) {
             CloudFileBrowserView(title: "OneDrive", service: oneDrive, onImport: onImport)

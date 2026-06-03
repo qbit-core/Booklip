@@ -69,6 +69,17 @@ This is a one-time setup. Takes ~15 minutes total.
 
 ---
 
+## 2b. Dropbox
+
+1. Go to **https://www.dropbox.com/developers/apps** → **Create app**
+2. **Scoped access** → **Full Dropbox** (or App folder if you prefer)
+3. **Permissions** tab → enable `files.metadata.read` and `files.content.read` → Submit
+4. **Settings** tab → **OAuth 2 → Redirect URIs** → add `readerapp://auth/dropbox`
+5. Copy the **App key** → paste into `CloudConfig.dropboxClientID`
+   (Installed apps use PKCE; no app secret needed.)
+
+---
+
 ## 3. Fill in CloudConfig.swift
 
 ```swift
@@ -90,8 +101,8 @@ back into the app.
 
 1. Xcode → select the **ReaderApp** target → **Info** tab
 2. Expand **URL Types** (add the section if missing) → **+** twice
-3. Entry 1 (OneDrive):
-   - Identifier: `onedrive-auth`
+3. Entry 1 (OneDrive + Dropbox both use the `readerapp` scheme):
+   - Identifier: `readerapp-auth`
    - URL Schemes: `readerapp`
 4. Entry 2 (Google):
    - Identifier: `google-auth`

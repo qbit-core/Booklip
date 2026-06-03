@@ -14,6 +14,14 @@
 //   3. OAuth consent screen → External, add scope: .../auth/drive.readonly
 //   4. Credentials → OAuth 2.0 Client ID → iOS → Bundle ID: your.bundle.id
 //   5. Copy Client ID below
+//
+// Dropbox:
+//   1. Go to https://www.dropbox.com/developers/apps → Create app
+//   2. Choose "Scoped access" → "Full Dropbox" (or App folder)
+//   3. Permissions tab → enable files.metadata.read + files.content.read
+//   4. Settings tab → OAuth 2 → Redirect URIs → add: readerapp://auth/dropbox
+//   5. Copy the App key below
+//   (Use PKCE / no app secret for installed apps.)
 
 enum CloudConfig {
     // Microsoft OneDrive
@@ -23,4 +31,8 @@ enum CloudConfig {
     // Google Drive
     static let googleClientID     = "157712219209-5bgl7747tqfi85q082ch6si7gcth7hi8.apps.googleusercontent.com"   // ends in .apps.googleusercontent.com
     static let googleRedirectURI  = "com.googleusercontent.apps.157712219209-5bgl7747tqfi85q082ch6si7gcth7hi8:/oauth2redirect"
+
+    // Dropbox
+    static let dropboxClientID    = "YOUR_DROPBOX_APP_KEY"
+    static let dropboxRedirectURI = "readerapp://auth/dropbox"
 }
