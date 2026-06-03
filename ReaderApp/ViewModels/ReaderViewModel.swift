@@ -88,9 +88,9 @@ class ReaderViewModel: ObservableObject {
         progress = min(max(value, 0), 1)
     }
 
+    // UTF-16 offset (matches NSString/AVSpeechSynthesizer ranges) at current progress.
     var ttsOffset: Int {
-        let clampedOffset = max(0, min(Int(Double(plainText.count) * progress), plainText.count))
-        let index = plainText.index(plainText.startIndex, offsetBy: clampedOffset)
-        return plainText.distance(from: plainText.startIndex, to: index)
+        let length = (plainText as NSString).length
+        return max(0, min(Int(Double(length) * progress), length))
     }
 }

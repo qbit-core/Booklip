@@ -3,6 +3,7 @@ import SwiftUI
 struct TextReaderView: View {
     @ObservedObject var vm: ReaderViewModel
     @ObservedObject var settings: ReadingSettings
+    @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
 
     var body: some View {
@@ -11,6 +12,7 @@ struct TextReaderView: View {
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
             settings: settings,
             progress: $vm.progress,
+            spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() }
         )
     }
@@ -26,6 +28,7 @@ struct NativeTextView: NSViewRepresentable {
     let attributedText: AttributedString?
     let settings: ReadingSettings
     @Binding var progress: Double
+    var spokenRange: NSRange?
     let onTap: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress, onTap: onTap) }
@@ -57,6 +60,8 @@ struct NativeTextView: NSViewRepresentable {
         applyContent(to: textView)
         // Scroll to progress if it was changed externally (e.g. dragging the progress bar)
         context.coordinator.scrollToProgress(progress)
+        let highlight = NSColor(settings.currentPreset.text).withAlphaComponent(0.18)
+        context.coordinator.updateHighlight(spokenRange, in: textView, color: highlight)
     }
 
     private func applyContent(to textView: NSTextView) {
@@ -91,10 +96,25 @@ struct NativeTextView: NSViewRepresentable {
         let onTap: () -> Void
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
+        private var lastHighlight: NSRange?
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
             _progress = progress
             self.onTap = onTap
+        }
+
+        func updateHighlight(_ range: NSRange?, in textView: NSTextView, color: NSColor) {
+            if let a = range, let b = lastHighlight, NSEqualRanges(a, b) { return }
+            if range == nil && lastHighlight == nil { return }
+            guard let storage = textView.textStorage else { return }
+            if let old = lastHighlight, NSMaxRange(old) <= storage.length {
+                storage.removeAttribute(.backgroundColor, range: old)
+            }
+            lastHighlight = range
+            if let r = range, NSMaxRange(r) <= storage.length {
+                storage.addAttribute(.backgroundColor, value: color, range: r)
+                textView.scrollRangeToVisible(r)
+            }
         }
 
         func scrollToProgress(_ target: Double) {
@@ -141,6 +161,7 @@ struct NativeTextView: UIViewRepresentable {
     let attributedText: AttributedString?
     let settings: ReadingSettings
     @Binding var progress: Double
+    var spokenRange: NSRange?
     let onTap: () -> Void
 
     // Above this length we skip the per-character paragraph-style pass,
@@ -182,6 +203,10 @@ struct NativeTextView: UIViewRepresentable {
         }
 
         context.coordinator.restoreProgressIfNeeded(progress, in: textView)
+
+        // TTS highlight + auto-scroll
+        let highlight = UIColor(settings.currentPreset.text).withAlphaComponent(0.18)
+        context.coordinator.updateHighlight(spokenRange, in: textView, color: highlight)
     }
 
     private func applyContent(to textView: UITextView) {
@@ -216,10 +241,36 @@ struct NativeTextView: UIViewRepresentable {
         var lastStyleKey = ""
         var lastContentKey = ""
         private var didRestoreProgress = false
+        private var lastHighlight: NSRange?
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
             _progress = progress
             self.onTap = onTap
+        }
+
+        func updateHighlight(_ range: NSRange?, in textView: UITextView, color: UIColor) {
+            guard !sameRange(range, lastHighlight) else { return }
+            let storage = textView.textStorage
+            // Clear previous highlight
+            if let old = lastHighlight, NSMaxRange(old) <= storage.length {
+                storage.removeAttribute(.backgroundColor, range: old)
+            }
+            lastHighlight = range
+            // Apply new highlight + scroll it into view
+            if let r = range, NSMaxRange(r) <= storage.length {
+                storage.addAttribute(.backgroundColor, value: color, range: r)
+                isScrollingProgrammatically = true
+                textView.scrollRangeToVisible(r)
+                isScrollingProgrammatically = false
+            }
+        }
+
+        private func sameRange(_ a: NSRange?, _ b: NSRange?) -> Bool {
+            switch (a, b) {
+            case (nil, nil): return true
+            case let (x?, y?): return NSEqualRanges(x, y)
+            default: return false
+            }
         }
 
         // Restore saved reading position once, after layout has a content size.

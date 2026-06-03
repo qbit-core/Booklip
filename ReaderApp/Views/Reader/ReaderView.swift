@@ -26,7 +26,7 @@ struct ReaderView: View {
             } else if book.format == .pdf {
                 PDFReaderView(document: vm.pdfDocument, progress: $vm.progress)
             } else {
-                TextReaderView(vm: vm, settings: settings, showBars: $showBars)
+                TextReaderView(vm: vm, settings: settings, tts: tts, showBars: $showBars)
             }
 
             if showBars {

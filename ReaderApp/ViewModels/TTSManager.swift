@@ -13,26 +13,30 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var rate: Float = AVSpeechUtteranceDefaultSpeechRate
     @Published var pitch: Float = 1.0
 
+    /// Character range (UTF-16, in the full document text) currently being spoken.
+    /// nil when stopped. Views observe this to highlight & auto-scroll.
+    @Published var spokenRange: NSRange?
+
     private let synthesizer = AVSpeechSynthesizer()
 
-    // Chunked playback state
-    private var chunks: [String] = []
+    // Chunked playback state — each chunk is an exact substring of `fullText`
+    // so its global UTF-16 offset is known precisely.
+    private var fullText: NSString = ""
+    private var chunkRanges: [NSRange] = []
     private var currentChunkIndex = 0
 
-    // Max characters per utterance — keeps AVSpeechSynthesizer stable
     private let maxChunkSize = 500
 
     var availableVoices: [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
             .filter { voice in
-                    let lang = voice.language.lowercased()
-                    let name = voice.name.lowercased()
-                    
-                    return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
-                            (name.contains("yuna") || name.contains("eddy") ||
-                             name.contains("flo") || name.contains("samantha"))
-                }
-                .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
+                let lang = voice.language.lowercased()
+                let name = voice.name.lowercased()
+                return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
+                    (name.contains("yuna") || name.contains("eddy") ||
+                     name.contains("flo") || name.contains("samantha"))
+            }
+            .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
     }
 
     var selectedVoice: AVSpeechSynthesisVoice? {
@@ -52,8 +56,8 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func speak(text: String, from offset: Int = 0) {
         synthesizer.stopSpeaking(at: .immediate)
-        let remaining = String(text.dropFirst(max(0, min(offset, text.count))))
-        chunks = split(remaining)
+        fullText = text as NSString
+        chunkRanges = makeChunkRanges(in: fullText, startingAt: offset)
         currentChunkIndex = 0
         speakCurrentChunk()
     }
@@ -71,9 +75,10 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
-        chunks = []
+        chunkRanges = []
         currentChunkIndex = 0
         isPlaying = false
+        spokenRange = nil
     }
 
     func togglePlayPause(text: String, currentOffset: Int) {
@@ -86,42 +91,36 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    // MARK: - Chunking
+    // MARK: - Chunking (exact substrings → preserves global offsets)
 
-    /// Splits text at paragraph/sentence boundaries into ≤ maxChunkSize pieces.
-    private func split(_ text: String) -> [String] {
-        var result: [String] = []
-        // Split at paragraph boundaries first
-        let paragraphs = text.components(separatedBy: "\n\n")
-        for para in paragraphs where !para.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if para.count <= maxChunkSize {
-                result.append(para)
-            } else {
-                // Further split long paragraphs at sentence endings
-                var current = ""
-                for sentence in para.components(separatedBy: CharacterSet(charactersIn: ".!?\n")) {
-                    let trimmed = sentence.trimmingCharacters(in: .whitespaces)
-                    guard !trimmed.isEmpty else { continue }
-                    if current.count + trimmed.count + 2 > maxChunkSize {
-                        if !current.isEmpty { result.append(current) }
-                        current = trimmed
-                    } else {
-                        current += (current.isEmpty ? "" : ". ") + trimmed
-                    }
+    private func makeChunkRanges(in ns: NSString, startingAt start: Int) -> [NSRange] {
+        let length = ns.length
+        var ranges: [NSRange] = []
+        var i = max(0, min(start, length))
+        while i < length {
+            var end = min(i + maxChunkSize, length)
+            if end < length {
+                // Prefer to break at a whitespace/newline in the second half of the window
+                let window = NSRange(location: i, length: end - i)
+                let r = ns.rangeOfCharacter(from: .whitespacesAndNewlines, options: .backwards, range: window)
+                if r.location != NSNotFound && r.location > i + maxChunkSize / 2 {
+                    end = r.location + r.length
                 }
-                if !current.isEmpty { result.append(current) }
             }
+            ranges.append(NSRange(location: i, length: end - i))
+            i = end
         }
-        return result.isEmpty ? [text] : result
+        return ranges
     }
 
     private func speakCurrentChunk() {
-        guard currentChunkIndex < chunks.count else {
+        guard currentChunkIndex < chunkRanges.count else {
             isPlaying = false
+            spokenRange = nil
             return
         }
-        let text = chunks[currentChunkIndex]
-        let utterance = AVSpeechUtterance(string: text)
+        let chunk = fullText.substring(with: chunkRanges[currentChunkIndex])
+        let utterance = AVSpeechUtterance(string: chunk)
         utterance.voice = selectedVoice
         utterance.rate = rate
         utterance.pitchMultiplier = pitch
@@ -130,6 +129,16 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     // MARK: - AVSpeechSynthesizerDelegate
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       willSpeakRangeOfSpeechString characterRange: NSRange,
+                                       utterance: AVSpeechUtterance) {
+        Task { @MainActor [self] in
+            guard currentChunkIndex < chunkRanges.count else { return }
+            let base = chunkRanges[currentChunkIndex].location
+            spokenRange = NSRange(location: base + characterRange.location, length: characterRange.length)
+        }
+    }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        didFinish utterance: AVSpeechUtterance) {
