@@ -12,7 +12,18 @@ struct CloudConnectView: View {
     @State private var showICloudPicker    = false
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
+            // Custom header (gives full control over margins, unlike a nav-bar item)
+            ZStack {
+                Text("Cloud Storage").font(.headline)
+                HStack {
+                    Spacer()
+                    Button("Done") { dismiss() }.fontWeight(.semibold)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+
             List {
                 // iCloud Drive — available through the system document picker, no sign-in
                 Section {
@@ -74,13 +85,7 @@ struct CloudConnectView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Cloud Storage")
-            .inlineNavigationTitle()
-            .toolbar {
-                ToolbarItem(placement: .platformTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
+            .contentMargins(.horizontal, 12, for: .scrollContent)
         }
         .frame(minWidth: 480, minHeight: 380)
         .fileImporter(isPresented: $showICloudPicker,
