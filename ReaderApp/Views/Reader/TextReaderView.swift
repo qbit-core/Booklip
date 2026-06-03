@@ -117,8 +117,7 @@ struct NativeTextView: NSViewRepresentable {
         }
 
         // Always re-apply style attributes so font/color/spacing changes take effect
-        let storage = textView.textStorage
-        if storage.length > 0 {
+        if let storage = textView.textStorage, storage.length > 0 {
             storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
