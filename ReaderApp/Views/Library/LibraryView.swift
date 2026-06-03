@@ -5,7 +5,6 @@ struct LibraryView: View {
     @EnvironmentObject private var library: LibraryViewModel
     @EnvironmentObject private var settings: ReadingSettings
     @State private var showingFilePicker = false
-    @State private var showingURLImport = false
     @State private var showingCloudConnect = false
     @State private var searchText = ""
     @State private var showingNewFolder = false
@@ -24,12 +23,16 @@ struct LibraryView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .padding(.top, 8)
+                .disabled(library.isSelecting)
 
                 if selectedTab == .all {
                     AllBooksView(showingFilePicker: $showingFilePicker, searchText: $searchText)
                 } else {
                     FoldersView(showingFilePicker: $showingFilePicker)
                 }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if library.isSelecting { selectionBar }
             }
             .navigationTitle("Library")
             .toolbar { toolbarContent }
@@ -57,39 +60,119 @@ struct LibraryView: View {
         }
     }
 
+    // MARK: - Toolbar
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .platformTrailing) {
-            HStack(spacing: 12) {
-                Menu {
-                    ForEach(SortOption.allCases) { option in
-                        Button {
-                            library.sortOption = option
-                        } label: {
-                            Label(option.rawValue,
-                                  systemImage: library.sortOption == option ? "checkmark" : "")
+            if library.isSelecting {
+                Button("Done") { library.setSelecting(false) }
+            } else {
+                HStack(spacing: 12) {
+                    // View mode
+                    Menu {
+                        ForEach(ViewMode.allCases) { mode in
+                            Button {
+                                library.viewMode = mode
+                            } label: {
+                                Label(mode.rawValue, systemImage: library.viewMode == mode ? "checkmark" : mode.icon)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: library.viewMode.icon)
+                    }
+
+                    // Sort
+                    Menu {
+                        ForEach(SortOption.allCases) { option in
+                            Button {
+                                library.sortOption = option
+                            } label: {
+                                Label(option.rawValue, systemImage: library.sortOption == option ? "checkmark" : "")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+
+                    // Select
+                    Button { library.setSelecting(true) } label: {
+                        Image(systemName: "checkmark.circle")
+                    }
+
+                    if selectedTab == .folders {
+                        Button { showingNewFolder = true } label: {
+                            Image(systemName: "folder.badge.plus")
                         }
                     }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                }
 
-                if selectedTab == .folders {
-                    Button { showingNewFolder = true } label: {
-                        Image(systemName: "folder.badge.plus")
+                    // Add
+                    Menu {
+                        Button { showingFilePicker = true } label: {
+                            Label("Browse Files", systemImage: "folder")
+                        }
+                        Button { showingCloudConnect = true } label: {
+                            Label("Cloud Storage…", systemImage: "cloud")
+                        }
+                    } label: {
+                        Image(systemName: "plus")
                     }
                 }
+            }
+        }
+    }
 
-                Menu {
-                    Button { showingFilePicker = true } label: {
-                        Label("Browse Files", systemImage: "folder")
-                    }
-                    Button { showingCloudConnect = true } label: {
-                        Label("Cloud Storage…", systemImage: "cloud")
-                    }
-                } label: {
-                    Image(systemName: "plus")
+    // MARK: - Selection action bar
+
+    private var selectionBar: some View {
+        HStack(spacing: 16) {
+            Text("\(library.selectedBookIDs.count) selected")
+                .font(.subheadline.weight(.medium))
+
+            Spacer()
+
+            Menu {
+                Button("No Folder") { library.moveSelected(to: nil) }
+                if !library.folders.isEmpty { Divider() }
+                ForEach(library.folders) { folder in
+                    Button(folder.name) { library.moveSelected(to: folder) }
                 }
+            } label: {
+                Label("Move", systemImage: "folder")
+            }
+            .disabled(library.selectedBookIDs.isEmpty)
+
+            Button(role: .destructive) {
+                library.deleteSelected()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .disabled(library.selectedBookIDs.isEmpty)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+}
+
+// MARK: - Shared books collection (grid or list, with selection)
+
+struct BooksCollection: View {
+    @EnvironmentObject private var library: LibraryViewModel
+    let books: [Book]
+
+    var body: some View {
+        ScrollView {
+            if let minWidth = library.viewMode.minCellWidth {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 16)], spacing: 16) {
+                    ForEach(books) { BookCardLink(book: $0) }
+                }
+                .padding()
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(books) { BookCardLink(book: $0) }
+                }
+                .padding()
             }
         }
     }
@@ -122,12 +205,7 @@ private struct AllBooksView: View {
             }
             .padding().frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
-                    ForEach(filtered) { book in BookCardLink(book: book) }
-                }
-                .padding()
-            }
+            BooksCollection(books: filtered)
         }
     }
 }
@@ -201,14 +279,9 @@ struct FolderDetailView: View {
         Group {
             if library.books(in: folder).isEmpty {
                 ContentUnavailableView("No Books", systemImage: "folder",
-                    description: Text("Right-click a book and choose Move to Folder."))
+                    description: Text("Select books and choose Move to put them here."))
             } else {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
-                        ForEach(library.books(in: folder)) { book in BookCardLink(book: book) }
-                    }
-                    .padding()
-                }
+                BooksCollection(books: library.books(in: folder))
             }
         }
         .navigationTitle(folder.name)
@@ -218,41 +291,99 @@ struct FolderDetailView: View {
 struct UnfiledBooksView: View {
     @EnvironmentObject private var library: LibraryViewModel
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
-                ForEach(library.unfolderedBooks) { book in BookCardLink(book: book) }
-            }
-            .padding()
-        }
-        .navigationTitle("Unfiled")
+        BooksCollection(books: library.unfolderedBooks)
+            .navigationTitle("Unfiled")
     }
 }
 
-// MARK: - BookCardLink
+// MARK: - BookCardLink (card/row + selection)
 
 struct BookCardLink: View {
     @EnvironmentObject private var library: LibraryViewModel
     let book: Book
 
+    private var isSelected: Bool { library.selectedBookIDs.contains(book.id) }
+    private var isList: Bool { library.viewMode == .list }
+
     var body: some View {
-        NavigationLink(destination: ReaderView(book: book)) {
-            BookCard(book: book)
+        if library.isSelecting {
+            Button { library.toggleSelection(book.id) } label: { cell }
+                .buttonStyle(.plain)
+        } else {
+            NavigationLink(destination: ReaderView(book: book)) { cell }
+                .buttonStyle(.plain)
+                .contextMenu { contextMenu }
         }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Menu {
-                Button("No Folder") { library.moveBook(book, to: nil) }
-                if !library.folders.isEmpty { Divider() }
-                ForEach(library.folders) { folder in
-                    Button(folder.name) { library.moveBook(book, to: folder) }
+    }
+
+    @ViewBuilder private var cell: some View {
+        Group {
+            if isList {
+                BookRow(book: book)
+            } else {
+                BookCard(book: book)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if library.isSelecting {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .padding(6)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .padding(6)
+            }
+        }
+    }
+
+    @ViewBuilder private var contextMenu: some View {
+        Menu {
+            Button("No Folder") { library.moveBook(book, to: nil) }
+            if !library.folders.isEmpty { Divider() }
+            ForEach(library.folders) { folder in
+                Button(folder.name) { library.moveBook(book, to: folder) }
+            }
+        } label: {
+            Label("Move to Folder", systemImage: "folder")
+        }
+        Button(role: .destructive) { library.delete(book: book) } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+}
+
+// MARK: - List row
+
+private struct BookRow: View {
+    let book: Book
+
+    var body: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(coverColor)
+                .frame(width: 40, height: 56)
+                .overlay(Text(book.format.displayName.prefix(1))
+                    .font(.caption.bold()).foregroundStyle(.white))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(book.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(book.author).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if book.progress > 0 {
+                    ProgressView(value: book.progress).tint(.accentColor)
                 }
-            } label: {
-                Label("Move to Folder", systemImage: "folder")
             }
-            Button(role: .destructive) { library.delete(book: book) } label: {
-                Label("Delete", systemImage: "trash")
-            }
+            Spacer()
+            Text("\(Int(book.progress * 100))%")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var coverColor: Color {
+        let colors: [Color] = [.indigo, .teal, .orange, .pink, .purple, .green, .blue]
+        return colors[abs(book.title.hashValue) % colors.count]
     }
 }
 

@@ -32,6 +32,33 @@ enum SortOption: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum ViewMode: String, CaseIterable, Identifiable {
+    case list        = "List"
+    case smallGrid   = "Small"
+    case mediumGrid  = "Medium"
+    case largeGrid   = "Large"
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .list:       return "list.bullet"
+        case .smallGrid:  return "square.grid.4x3.fill"
+        case .mediumGrid: return "square.grid.3x3.fill"
+        case .largeGrid:  return "square.grid.2x2.fill"
+        }
+    }
+
+    /// Minimum cell width for the adaptive grid (nil = single-column list).
+    var minCellWidth: CGFloat? {
+        switch self {
+        case .list:       return nil
+        case .smallGrid:  return 100
+        case .mediumGrid: return 150
+        case .largeGrid:  return 210
+        }
+    }
+}
+
 struct Book: Identifiable, Codable {
     var id: UUID = UUID()
     var title: String

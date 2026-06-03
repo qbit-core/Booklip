@@ -8,7 +8,7 @@ struct BookCard: View {
             ZStack(alignment: .bottomTrailing) {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(coverColor)
-                    .frame(height: 200)
+                    .aspectRatio(2.0/3.0, contentMode: .fit)   // book-cover ratio, scales with cell width
                 Text(book.title)
                     .font(.headline)
                     .foregroundStyle(.white)

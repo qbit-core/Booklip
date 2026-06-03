@@ -9,10 +9,53 @@ class LibraryViewModel: ObservableObject {
     @Published var importError: String?
     @Published var showingImportError = false
 
+    // View mode (persisted)
+    @Published var viewMode: ViewMode = .mediumGrid {
+        didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "viewMode") }
+    }
+
+    // Multi-select state
+    @Published var isSelecting = false
+    @Published var selectedBookIDs: Set<UUID> = []
+
     init() {
         books = BookStore.load()
         folders = BookStore.loadFolders()
+        if let raw = UserDefaults.standard.string(forKey: "viewMode"),
+           let mode = ViewMode(rawValue: raw) {
+            viewMode = mode
+        }
         migrateUUIDTitles()
+    }
+
+    // MARK: - Selection
+
+    func toggleSelection(_ id: UUID) {
+        if selectedBookIDs.contains(id) { selectedBookIDs.remove(id) }
+        else { selectedBookIDs.insert(id) }
+    }
+
+    func setSelecting(_ on: Bool) {
+        isSelecting = on
+        if !on { selectedBookIDs.removeAll() }
+    }
+
+    func moveSelected(to folder: BookFolder?) {
+        for i in books.indices where selectedBookIDs.contains(books[i].id) {
+            books[i].folderID = folder?.id
+        }
+        BookStore.save(books)
+        setSelecting(false)
+    }
+
+    func deleteSelected() {
+        let ids = selectedBookIDs
+        ids.forEach { id in
+            if let book = books.first(where: { $0.id == id }) { BookStore.delete(book: book) }
+        }
+        books.removeAll { ids.contains($0.id) }
+        BookStore.save(books)
+        setSelecting(false)
     }
 
     // MARK: - Sorting
