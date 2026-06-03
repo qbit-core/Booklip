@@ -427,15 +427,22 @@ struct NativeTextView: UIViewRepresentable {
                 tv.setContentOffset(CGPoint(x: 0, y: target), animated: true)
 
             case .paper:
-                // Real UIKit page-curl: curl up when reading forward, down when going back.
+                // Horizontal page turn (right-to-left for forward): the new page
+                // pushes in from the right while the old page slides off left.
                 isScrollingProgrammatically = true
-                let option: UIView.AnimationOptions = forward ? .transitionCurlUp : .transitionCurlDown
-                UIView.transition(with: tv, duration: 0.45, options: option, animations: {
-                    tv.contentOffset = CGPoint(x: 0, y: target)
-                }, completion: { _ in
+                let transition = CATransition()
+                transition.duration = 0.4
+                transition.type = .push
+                transition.subtype = forward ? .fromRight : .fromLeft
+                transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                CATransaction.begin()
+                CATransaction.setCompletionBlock {
                     self.isScrollingProgrammatically = false
                     self.commitProgress(tv)
-                })
+                }
+                tv.layer.add(transition, forKey: "pageTurn")
+                tv.contentOffset = CGPoint(x: 0, y: target)
+                CATransaction.commit()
             }
         }
     }
