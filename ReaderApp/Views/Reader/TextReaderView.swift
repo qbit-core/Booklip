@@ -79,7 +79,8 @@ struct NativeTextView: NSViewRepresentable {
         }
 
         // Always re-apply style attributes so font/color/spacing changes take effect
-        if let storage = textView.textStorage, storage.length > 0 {
+        let storage = textView.textStorage
+        if storage.length > 0 {
             storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
@@ -144,27 +145,34 @@ struct NativeTextView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress, onTap: onTap) }
 
-    func makeUIView(context: Context) -> UITextView {
-        // UITextView scrolls natively with lazy TextKit layout — handles
-        // multi-million-character documents without laying everything out at once.
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
         let textView = UITextView()
         textView.isEditable = false
-        textView.isScrollEnabled = true
-        textView.alwaysBounceVertical = true
+        textView.isScrollEnabled = false
         textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 60, left: 20, bottom: 60, right: 20)
-        textView.delegate = context.coordinator
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(textView)
+        NSLayoutConstraint.activate([
+            textView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            textView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            textView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            textView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+        ])
         context.coordinator.textView = textView
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
-        tap.cancelsTouchesInView = false   // don't swallow scroll/selection touches
-        textView.addGestureRecognizer(tap)
-        return textView
+        context.coordinator.scrollView = scrollView
+        scrollView.delegate = context.coordinator
+        textView.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap)))
+        return scrollView
     }
 
-    func updateUIView(_ textView: UITextView, context: Context) {
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        guard let textView = context.coordinator.textView else { return }
         applyContent(to: textView)
-        textView.backgroundColor = UIColor(settings.currentPreset.background)
-        context.coordinator.scrollToProgress(progress, in: textView)
+        scrollView.backgroundColor = UIColor(settings.currentPreset.background)
+        context.coordinator.scrollToProgress(progress, in: scrollView)
     }
 
     private func applyContent(to textView: UITextView) {
@@ -179,21 +187,25 @@ struct NativeTextView: UIViewRepresentable {
 
         if let attr = attributedText {
             let str = NSAttributedString(attr).string
-            if textView.text != str { textView.attributedText = NSAttributedString(attr) }
+            if textView.text != str {
+                textView.attributedText = NSAttributedString(attr)
+            }
         } else if let str = text, textView.text != str {
             textView.text = str
         }
 
+        // Always re-apply style so font/color/spacing changes take effect
         let storage = textView.textStorage
         if storage.length > 0 {
             storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
         }
     }
 
-    class Coordinator: NSObject, UITextViewDelegate {
+    class Coordinator: NSObject, UIScrollViewDelegate {
         @Binding var progress: Double
         let onTap: () -> Void
         weak var textView: UITextView?
+        weak var scrollView: UIScrollView?
         var isScrollingProgrammatically = false
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
@@ -201,14 +213,14 @@ struct NativeTextView: UIViewRepresentable {
             self.onTap = onTap
         }
 
-        func scrollToProgress(_ target: Double, in textView: UITextView) {
-            let scrollable = textView.contentSize.height - textView.bounds.height
+        func scrollToProgress(_ target: Double, in scrollView: UIScrollView) {
+            let scrollable = scrollView.contentSize.height - scrollView.bounds.height
             guard scrollable > 0 else { return }
             let targetOffset = target * scrollable
-            let currentOffset = textView.contentOffset.y
+            let currentOffset = scrollView.contentOffset.y
             guard abs(targetOffset - currentOffset) > 1 else { return }
             isScrollingProgrammatically = true
-            textView.setContentOffset(CGPoint(x: 0, y: targetOffset), animated: false)
+            scrollView.contentOffset = CGPoint(x: 0, y: targetOffset)
             isScrollingProgrammatically = false
         }
 
