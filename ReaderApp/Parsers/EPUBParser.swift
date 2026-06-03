@@ -20,23 +20,105 @@ struct EPUBParser: BookParser, Sendable {
         let (title, author, spineHrefs) = try parseOPF(opfXML, base: opfBase)
 
         var fullText = ""
+        var blocks: [ContentBlock] = []
+
         for href in spineHrefs {
             let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
-            if let html = try? readEntry(entryPath, in: archive) {
-                fullText += stripHTML(html) + "\n\n"
+            let chapterDir = (entryPath as NSString).deletingLastPathComponent
+            guard let html = try? readEntry(entryPath, in: archive) else { continue }
+
+            // Split the chapter HTML around <img> tags, preserving order.
+            for segment in segments(of: html) {
+                switch segment {
+                case .html(let chunk):
+                    let text = stripHTML(chunk)
+                    if !text.isEmpty {
+                        blocks.append(.text(text))
+                        fullText += text + "\n\n"
+                    }
+                case .imageSrc(let src):
+                    let imgPath = resolvePath(src, relativeTo: chapterDir)
+                    if let data = try? readData(imgPath, in: archive), !data.isEmpty {
+                        blocks.append(.image(data))
+                    }
+                }
             }
         }
 
-        return ParsedBook(title: title, author: author, plainText: fullText.trimmingCharacters(in: .whitespacesAndNewlines))
+        return ParsedBook(title: title, author: author,
+                          plainText: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
+                          blocks: blocks)
     }
 
     // MARK: - Helpers
 
     nonisolated private func readEntry(_ path: String, in archive: Archive) throws -> String {
-        guard let entry = archive[path] else { throw EPUBError.missingEntry(path) }
+        let data = try readData(path, in: archive)
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+    }
+
+    nonisolated private func readData(_ path: String, in archive: Archive) throws -> Data {
+        // ZIP entries are case-sensitive; try the exact path then a case-insensitive match.
+        let entry = archive[path] ?? archive.first {
+            $0.path.caseInsensitiveCompare(path) == .orderedSame
+        }
+        guard let entry else { throw EPUBError.missingEntry(path) }
         var data = Data()
         _ = try archive.extract(entry) { chunk in data.append(chunk) }
-        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+        return data
+    }
+
+    // MARK: - HTML segmentation (text vs. <img>)
+
+    enum HTMLSegment {
+        case html(String)
+        case imageSrc(String)
+    }
+
+    nonisolated private func segments(of html: String) -> [HTMLSegment] {
+        // Matches <img ... src="..."> and <image ... xlink:href="..."> (SVG cover pages)
+        let pattern = #"<(?:img|image)\b[^>]*?(?:src|xlink:href)\s*=\s*["']([^"']+)["'][^>]*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return [.html(html)]
+        }
+        let ns = html as NSString
+        var result: [HTMLSegment] = []
+        var cursor = 0
+        regex.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let match else { return }
+            if match.range.location > cursor {
+                result.append(.html(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))))
+            }
+            if match.numberOfRanges > 1 {
+                let src = ns.substring(with: match.range(at: 1))
+                result.append(.imageSrc(src))
+            }
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            result.append(.html(ns.substring(from: cursor)))
+        }
+        return result.isEmpty ? [.html(html)] : result
+    }
+
+    // Resolve an href (possibly with ../) relative to the chapter's directory inside the zip.
+    nonisolated private func resolvePath(_ src: String, relativeTo dir: String) -> String {
+        // Strip any URL fragment/query
+        var s = src
+        if let hashIdx = s.firstIndex(of: "#") { s = String(s[..<hashIdx]) }
+        // Percent-decode (image filenames sometimes encoded)
+        s = s.removingPercentEncoding ?? s
+        if s.hasPrefix("/") { return String(s.dropFirst()) }
+
+        var components = dir.isEmpty ? [] : dir.components(separatedBy: "/")
+        for part in s.components(separatedBy: "/") {
+            switch part {
+            case "", ".": continue
+            case "..":    if !components.isEmpty { components.removeLast() }
+            default:      components.append(part)
+            }
+        }
+        return components.joined(separator: "/")
     }
 
     nonisolated private func extractOPFPath(from xml: String) throws -> String {

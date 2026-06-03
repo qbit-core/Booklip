@@ -4,10 +4,18 @@ protocol BookParser: Sendable {
     nonisolated func parse(url: URL) throws -> ParsedBook
 }
 
+// A piece of EPUB content — Sendable so it can cross the background-parse boundary.
+// Image data is decoded into a platform image later, on the main actor.
+enum ContentBlock: Sendable {
+    case text(String)
+    case image(Data)
+}
+
 struct ParsedBook: Sendable {
     var title: String
     var author: String
     var plainText: String
+    var blocks: [ContentBlock] = []   // rich content (EPUB); empty for plain formats
     var wordCount: Int { plainText.split(separator: " ").count }
 }
 

@@ -6,10 +6,15 @@ struct TextReaderView: View {
     @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
 
+    private var richBlocks: [ContentBlock] {
+        vm.book.format == .epub ? vm.blocks : []
+    }
+
     var body: some View {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
+            blocks: richBlocks,
             settings: settings,
             progress: $vm.progress,
             spokenRange: tts.spokenRange,
@@ -26,6 +31,7 @@ import AppKit
 struct NativeTextView: NSViewRepresentable {
     let text: String?
     let attributedText: AttributedString?
+    var blocks: [ContentBlock] = []
     let settings: ReadingSettings
     @Binding var progress: Double
     var spokenRange: NSRange?
@@ -73,6 +79,31 @@ struct NativeTextView: NSViewRepresentable {
         let styleAttrs: [NSAttributedString.Key: Any] = [
             .font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle
         ]
+
+        // EPUB with images: build a rich NSAttributedString from blocks
+        if !blocks.isEmpty {
+            let maxWidth = textView.bounds.width - 50
+            let result = NSMutableAttributedString()
+            for block in blocks {
+                switch block {
+                case .text(let s):
+                    result.append(NSAttributedString(string: s + "\n\n", attributes: styleAttrs))
+                case .image(let data):
+                    if let image = NSImage(data: data) {
+                        let attachment = NSTextAttachment()
+                        let cell = NSTextAttachmentCell(imageCell: image)
+                        attachment.attachmentCell = cell
+                        let w = max(1, maxWidth)
+                        let scale = min(1, w / max(image.size.width, 1))
+                        image.size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+                        result.append(NSAttributedString(attachment: attachment))
+                        result.append(NSAttributedString(string: "\n\n", attributes: styleAttrs))
+                    }
+                }
+            }
+            textView.textStorage?.setAttributedString(result)
+            return
+        }
 
         if let attr = attributedText {
             let str = NSAttributedString(attr).string
@@ -159,6 +190,7 @@ import UIKit
 struct NativeTextView: UIViewRepresentable {
     let text: String?
     let attributedText: AttributedString?
+    var blocks: [ContentBlock] = []
     let settings: ReadingSettings
     @Binding var progress: Double
     var spokenRange: NSRange?
@@ -192,8 +224,11 @@ struct NativeTextView: UIViewRepresentable {
         // Only restyle when text/style actually change — never on the frequent
         // progress updates that scrolling produces.
         let styleKey = "\(settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)"
-        let contentKey = text.map { "txt-\($0.count)" }
-            ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
+        let contentKey: String = {
+            if !blocks.isEmpty { return "blocks-\(blocks.count)" }
+            return text.map { "txt-\($0.count)" }
+                ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
+        }()
 
         if context.coordinator.lastStyleKey != styleKey || context.coordinator.lastContentKey != contentKey {
             applyContent(to: textView)
@@ -219,6 +254,37 @@ struct NativeTextView: UIViewRepresentable {
         let font = UIFont(name: settings.fontName, size: settings.fontSize)
             ?? UIFont.systemFont(ofSize: settings.fontSize)
         let color = UIColor(settings.currentPreset.text)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = settings.lineSpacing
+
+        // EPUB with images: build a rich NSAttributedString from blocks
+        if !blocks.isEmpty {
+            let maxWidth = textView.bounds.width - textView.textContainerInset.left - textView.textContainerInset.right - 10
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle
+            ]
+            let result = NSMutableAttributedString()
+            for block in blocks {
+                switch block {
+                case .text(let s):
+                    result.append(NSAttributedString(string: s + "\n\n", attributes: attrs))
+                case .image(let data):
+                    if let image = UIImage(data: data) {
+                        let attachment = NSTextAttachment()
+                        attachment.image = image
+                        let w = max(1, maxWidth)
+                        let scale = min(1, w / max(image.size.width, 1))
+                        attachment.bounds = CGRect(x: 0, y: 0,
+                                                   width: image.size.width * scale,
+                                                   height: image.size.height * scale)
+                        result.append(NSAttributedString(attachment: attachment))
+                        result.append(NSAttributedString(string: "\n\n", attributes: attrs))
+                    }
+                }
+            }
+            textView.attributedText = result
+            return
+        }
 
         if let attr = attributedText {
             textView.attributedText = NSAttributedString(attr)
@@ -232,8 +298,6 @@ struct NativeTextView: UIViewRepresentable {
         // Line spacing needs an attribute pass — affordable only for smaller docs
         let storage = textView.textStorage
         if storage.length > 0, storage.length <= Self.paragraphStyleLimit, settings.lineSpacing > 0 {
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.lineSpacing = settings.lineSpacing
             storage.addAttribute(.paragraphStyle, value: paragraphStyle,
                                  range: NSRange(location: 0, length: storage.length))
         }
