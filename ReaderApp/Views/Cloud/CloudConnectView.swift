@@ -87,7 +87,7 @@ struct CloudConnectView: View {
             }
             .contentMargins(.horizontal, 12, for: .scrollContent)
         }
-        .frame(minWidth: 480, minHeight: 380)
+        .cloudSheetFrame()
         .fileImporter(isPresented: $showICloudPicker,
                       allowedContentTypes: [.data],
                       allowsMultipleSelection: true) { result in
@@ -98,12 +98,24 @@ struct CloudConnectView: View {
         }
         .sheet(isPresented: $showOneDriveBrowser) {
             CloudFileBrowserView(title: "OneDrive", service: oneDrive, onImport: onImport)
-                .frame(minWidth: 500, minHeight: 500)
+                .cloudSheetFrame()
         }
         .sheet(isPresented: $showGoogleBrowser) {
             CloudFileBrowserView(title: "Google Drive", service: googleDrive, onImport: onImport)
-                .frame(minWidth: 500, minHeight: 500)
+                .cloudSheetFrame()
         }
+    }
+}
+
+private extension View {
+    // A minimum size only matters on macOS; on iOS forcing a min width wider
+    // than the screen pushes content (and the Done button) off the edge.
+    @ViewBuilder func cloudSheetFrame() -> some View {
+#if os(macOS)
+        self.frame(minWidth: 480, minHeight: 420)
+#else
+        self
+#endif
     }
 }
 
