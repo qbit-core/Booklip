@@ -234,7 +234,21 @@ struct NativeTextView: UIViewRepresentable {
             isScrollingProgrammatically = false
         }
 
-        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // Update progress only when scrolling settles — writing the binding on
+        // every frame re-renders the SwiftUI tree mid-scroll and causes jitter.
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { commitProgress(scrollView) }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            commitProgress(scrollView)
+        }
+
+        func scrollViewDidScrollToTop(_ scrollView: UIScrollView) {
+            commitProgress(scrollView)
+        }
+
+        private func commitProgress(_ scrollView: UIScrollView) {
             guard !isScrollingProgrammatically else { return }
             let scrollable = scrollView.contentSize.height - scrollView.bounds.height
             guard scrollable > 0 else { return }
