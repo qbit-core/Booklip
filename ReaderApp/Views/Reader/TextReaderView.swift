@@ -214,7 +214,7 @@ struct NativeTextView: UIViewRepresentable {
         textView.textContainerInset = UIEdgeInsets(top: 60, left: 20, bottom: 60, right: 20)
         textView.delegate = context.coordinator
         context.coordinator.textView = textView
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         tap.cancelsTouchesInView = false
         textView.addGestureRecognizer(tap)
         return textView
@@ -380,6 +380,12 @@ struct NativeTextView: UIViewRepresentable {
             commitProgress(scrollView)
         }
 
+        // Fires when an animated setContentOffset (a page turn) finishes.
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+            isScrollingProgrammatically = false
+            commitProgress(scrollView)
+        }
+
         private func commitProgress(_ scrollView: UIScrollView) {
             guard !isScrollingProgrammatically else { return }
             let scrollable = scrollView.contentSize.height - scrollView.bounds.height
@@ -389,7 +395,29 @@ struct NativeTextView: UIViewRepresentable {
             progress = value
         }
 
-        @objc func handleTap() { onTap() }
+        // Tap zones: left third = page back, right third = page forward, middle = toggle bars.
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard let tv = textView, tv.bounds.width > 0 else { onTap(); return }
+            let x = gesture.location(in: tv).x
+            let w = tv.bounds.width
+            if x < w * 0.30 {
+                page(tv, forward: false)
+            } else if x > w * 0.70 {
+                page(tv, forward: true)
+            } else {
+                onTap()
+            }
+        }
+
+        private func page(_ tv: UITextView, forward: Bool) {
+            // Advance ~one screenful, keeping a little overlap for reading continuity.
+            let step = max(tv.bounds.height - 90, 120)
+            let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+            let target = min(max(0, tv.contentOffset.y + (forward ? step : -step)), maxOffset)
+            guard abs(target - tv.contentOffset.y) > 1 else { return }
+            isScrollingProgrammatically = true   // cleared in didEndScrollingAnimation
+            tv.setContentOffset(CGPoint(x: 0, y: target), animated: true)
+        }
     }
 }
 #endif
