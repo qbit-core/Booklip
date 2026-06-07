@@ -4,10 +4,15 @@ import Foundation
 // Books have per-device UUIDs, so we key on a stable content signature
 // (title + author + word count) instead of the local id.
 enum ProgressSync {
-    // Only touch iCloud KVS when iCloud is actually configured/signed in.
-    // Without it, accessing NSUbiquitousKeyValueStore logs "BUG IN CLIENT OF KVS".
+    // iCloud sync is OFF until the app has the iCloud "Key-value storage"
+    // capability. Touching NSUbiquitousKeyValueStore.default without that
+    // entitlement logs "BUG IN CLIENT OF KVS", so we never access it while
+    // disabled. After enabling the capability in Signing & Capabilities,
+    // flip this to true to turn on cross-device progress sync.
+    static let enabled = false
+
     private static var isAvailable: Bool {
-        FileManager.default.ubiquityIdentityToken != nil
+        enabled && FileManager.default.ubiquityIdentityToken != nil
     }
 
     private static let store = NSUbiquitousKeyValueStore.default
