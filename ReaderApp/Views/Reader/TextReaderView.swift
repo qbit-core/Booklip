@@ -551,6 +551,10 @@ struct NativeTextView: UIViewRepresentable {
 
         // Update progress only when scrolling settles — writing the binding on
         // every frame re-renders the SwiftUI tree mid-scroll and causes jitter.
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            pageTargetY = nil   // user took over; forget any queued page target
+        }
+
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
             if !decelerate { commitProgress(scrollView) }
         }
@@ -566,6 +570,7 @@ struct NativeTextView: UIViewRepresentable {
         // Fires when an animated setContentOffset (a page turn) finishes.
         func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
             isScrollingProgrammatically = false
+            pageTargetY = nil
             commitProgress(scrollView)
         }
 
@@ -615,12 +620,18 @@ struct NativeTextView: UIViewRepresentable {
             return UIMenu(children: suggestedActions + [highlightMenu])
         }
 
+        private var pageTargetY: CGFloat?   // intended offset while a turn animates
+
         private func page(_ tv: UITextView, forward: Bool) {
             // Advance ~one screenful, keeping a little overlap for reading continuity.
             let step = max(tv.bounds.height - 90, 120)
             let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
-            let target = min(max(0, tv.contentOffset.y + (forward ? step : -step)), maxOffset)
-            guard abs(target - tv.contentOffset.y) > 1 else { return }
+            // Base on the in-flight target (not the interpolating contentOffset)
+            // so a tap during the animation advances instead of repeating the page.
+            let base = pageTargetY ?? tv.contentOffset.y
+            let target = min(max(0, base + (forward ? step : -step)), maxOffset)
+            guard abs(target - base) > 1 else { return }
+            pageTargetY = target
 
             switch pageEffect {
             case .verticalSlide:
@@ -639,6 +650,7 @@ struct NativeTextView: UIViewRepresentable {
                 CATransaction.begin()
                 CATransaction.setCompletionBlock {
                     self.isScrollingProgrammatically = false
+                    self.pageTargetY = nil
                     self.commitProgress(tv)
                 }
                 tv.layer.add(transition, forKey: "pageTurn")
