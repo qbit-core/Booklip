@@ -5,6 +5,7 @@ struct TextReaderView: View {
     @ObservedObject var settings: ReadingSettings
     @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
+    @Binding var autoScrolling: Bool
 
     private var richBlocks: [ContentBlock] {
         vm.book.format == .epub ? vm.blocks : []
@@ -18,6 +19,8 @@ struct TextReaderView: View {
             settings: settings,
             pageEffect: settings.pageEffect,
             embeddedFontName: settings.useEmbeddedFont ? vm.embeddedFontName : nil,
+            autoScrolling: $autoScrolling,
+            autoScrollSpeed: settings.autoScrollSpeed,
             progress: $vm.progress,
             spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() }
@@ -37,6 +40,8 @@ struct NativeTextView: NSViewRepresentable {
     let settings: ReadingSettings
     var pageEffect: PageEffect = .verticalSlide
     var embeddedFontName: String?
+    @Binding var autoScrolling: Bool
+    var autoScrollSpeed: Double = 40
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -198,6 +203,8 @@ struct NativeTextView: UIViewRepresentable {
     let settings: ReadingSettings
     var pageEffect: PageEffect = .verticalSlide
     var embeddedFontName: String?
+    @Binding var autoScrolling: Bool
+    var autoScrollSpeed: Double = 40
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -207,7 +214,9 @@ struct NativeTextView: UIViewRepresentable {
     // full-document layout that freezes the UI on open.
     private static let paragraphStyleLimit = 200_000
 
-    func makeCoordinator() -> Coordinator { Coordinator(progress: $progress, onTap: onTap) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(progress: $progress, autoScrolling: $autoScrolling, onTap: onTap)
+    }
 
     func makeUIView(context: Context) -> UITextView {
         // Force TextKit 1 (accessing layoutManager opts out of TextKit 2),
@@ -230,6 +239,8 @@ struct NativeTextView: UIViewRepresentable {
 
     func updateUIView(_ textView: UITextView, context: Context) {
         context.coordinator.pageEffect = pageEffect
+        context.coordinator.autoScrollSpeed = autoScrollSpeed
+        context.coordinator.setAutoScrolling(autoScrolling)
         // Only restyle when text/style actually change — never on the frequent
         // progress updates that scrolling produces.
         let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)"
@@ -322,6 +333,7 @@ struct NativeTextView: UIViewRepresentable {
 
     class Coordinator: NSObject, UITextViewDelegate {
         @Binding var progress: Double
+        @Binding var autoScrolling: Bool
         let onTap: () -> Void
         weak var textView: UITextView?
         var isScrollingProgrammatically = false
@@ -331,9 +343,50 @@ struct NativeTextView: UIViewRepresentable {
         private var lastHighlight: NSRange?
         var pageEffect: PageEffect = .verticalSlide
 
-        init(progress: Binding<Double>, onTap: @escaping () -> Void) {
+        // Auto-scroll
+        var autoScrollSpeed: Double = 40            // points per second
+        private var displayLink: CADisplayLink?
+        private var autoScrollAccumulator: CFTimeInterval = 0
+
+        init(progress: Binding<Double>, autoScrolling: Binding<Bool>, onTap: @escaping () -> Void) {
             _progress = progress
+            _autoScrolling = autoScrolling
             self.onTap = onTap
+        }
+
+        deinit { displayLink?.invalidate() }
+
+        func setAutoScrolling(_ on: Bool) {
+            if on, displayLink == nil {
+                let link = CADisplayLink(target: self, selector: #selector(autoScrollTick(_:)))
+                link.add(to: .main, forMode: .common)
+                displayLink = link
+            } else if !on {
+                displayLink?.invalidate()
+                displayLink = nil
+            }
+        }
+
+        @objc private func autoScrollTick(_ link: CADisplayLink) {
+            guard let tv = textView else { return }
+            let dy = CGFloat(autoScrollSpeed) * CGFloat(link.duration)
+            let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+            let newY = min(tv.contentOffset.y + dy, maxOffset)
+            isScrollingProgrammatically = true
+            tv.contentOffset.y = newY
+            isScrollingProgrammatically = false
+
+            // Report progress a few times per second (without triggering a fight).
+            autoScrollAccumulator += link.duration
+            if autoScrollAccumulator > 0.4 {
+                autoScrollAccumulator = 0
+                if tv.textStorage.length > 0 {
+                    let v = charProgress(tv)
+                    lastReportedProgress = v
+                    progress = v
+                }
+            }
+            if newY >= maxOffset { autoScrolling = false }   // reached the end
         }
 
         func updateHighlight(_ range: NSRange?, in textView: UITextView, color: UIColor) {

@@ -10,6 +10,7 @@ struct ReaderView: View {
     @State private var showTTS = false
     @State private var showContents = false
     @State private var showBars = true
+    @State private var autoScrolling = false
 
     init(book: Book) {
         self.book = book
@@ -27,7 +28,7 @@ struct ReaderView: View {
             } else if book.format == .pdf {
                 PDFReaderView(document: vm.pdfDocument, progress: $vm.progress)
             } else {
-                TextReaderView(vm: vm, settings: settings, tts: tts, showBars: $showBars)
+                TextReaderView(vm: vm, settings: settings, tts: tts, showBars: $showBars, autoScrolling: $autoScrolling)
             }
 
             if showBars {
@@ -74,11 +75,28 @@ struct ReaderView: View {
     private var bottomBar: some View {
         VStack(spacing: 0) {
             ReadingProgressBar(progress: $vm.progress)
-            HStack(spacing: 32) {
+
+            // Auto-scroll speed appears while auto-scrolling
+            if autoScrolling {
+                HStack(spacing: 12) {
+                    Image(systemName: "tortoise").foregroundStyle(.secondary)
+                    Slider(value: $settings.autoScrollSpeed, in: 15...150)
+                    Image(systemName: "hare").foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 8)
+            }
+
+            HStack(spacing: 28) {
                 Button { showTTS = true } label: {
                     Image(systemName: tts.isPlaying ? "waveform" : "play.circle")
                         .font(.title2)
                         .symbolEffect(.variableColor, isActive: tts.isPlaying)
+                }
+                Button { autoScrolling.toggle() } label: {
+                    Image(systemName: autoScrolling ? "pause.circle.fill" : "arrow.down.circle")
+                        .font(.title2)
+                        .foregroundStyle(autoScrolling ? Color.accentColor : .primary)
                 }
                 Spacer()
                 Button { showAppearance = true } label: {
@@ -100,6 +118,7 @@ struct ReaderView: View {
     }
 
     private func saveProgress() {
+        autoScrolling = false
         library.updateProgress(for: book.id, progress: vm.progress)
         tts.stop()
     }
