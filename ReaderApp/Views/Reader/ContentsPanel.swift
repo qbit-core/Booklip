@@ -7,7 +7,7 @@ struct ContentsPanel: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tab: Tab = .contents
 
-    enum Tab: String, CaseIterable { case contents = "Contents", bookmarks = "Bookmarks" }
+    enum Tab: String, CaseIterable { case contents = "Contents", bookmarks = "Bookmarks", highlights = "Highlights" }
 
     var body: some View {
         NavigationStack {
@@ -18,7 +18,11 @@ struct ContentsPanel: View {
                 .pickerStyle(.segmented)
                 .padding()
 
-                if tab == .contents { contentsList } else { bookmarksList }
+                switch tab {
+                case .contents:   contentsList
+                case .bookmarks:  bookmarksList
+                case .highlights: highlightsList
+                }
             }
             .navigationTitle("Navigate")
             .inlineNavigationTitle()
@@ -81,6 +85,38 @@ struct ContentsPanel: View {
                     }
                     .onDelete { offsets in
                         offsets.map { vm.bookmarks[$0] }.forEach(vm.deleteBookmark)
+                    }
+                }
+            }
+        }
+    }
+
+    private var highlightsList: some View {
+        Group {
+            if vm.highlights.isEmpty {
+                ContentUnavailableView("No Highlights", systemImage: "highlighter",
+                    description: Text("Turn on the highlighter, select text, and choose a color."))
+            } else {
+                List {
+                    ForEach(vm.highlights) { h in
+                        Button {
+                            onJump(h.progress); dismiss()
+                        } label: {
+                            HStack(alignment: .top, spacing: 10) {
+                                Circle()
+                                    .fill((HighlightColor(rawValue: h.colorName)?.color ?? .yellow).opacity(0.6))
+                                    .frame(width: 14, height: 14).padding(.top, 3)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(h.snippet).font(.subheadline).lineLimit(3)
+                                    Text("\(Int(h.progress * 100))%")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .onDelete { offsets in
+                        offsets.map { vm.highlights[$0] }.forEach(vm.deleteHighlight)
                     }
                 }
             }

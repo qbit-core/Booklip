@@ -29,6 +29,7 @@ class ReaderViewModel: ObservableObject {
     @Published var embeddedFontName: String?   // PostScript name of the book's embedded font, if any
     @Published var chapters: [Chapter] = []
     @Published var bookmarks: [Bookmark] = []
+    @Published var highlights: [Highlight] = []
     @Published var pdfDocument: PDFDocument?
     @Published var progress: Double = 0.0
     @Published var isLoading = true
@@ -41,6 +42,22 @@ class ReaderViewModel: ObservableObject {
         self.book = book
         self.progress = book.progress
         self.bookmarks = BookStore.loadBookmarks(book.id)
+        self.highlights = BookStore.loadHighlights(book.id)
+    }
+
+    // MARK: - Highlights
+
+    func addHighlight(range: NSRange, colorName: String, snippet: String, progress: Double) {
+        let h = Highlight(bookID: book.id, location: range.location, length: range.length,
+                          colorName: colorName, snippet: snippet, progress: progress)
+        highlights.append(h)
+        highlights.sort { $0.progress < $1.progress }
+        BookStore.saveHighlights(highlights, for: book.id)
+    }
+
+    func deleteHighlight(_ h: Highlight) {
+        highlights.removeAll { $0.id == h.id }
+        BookStore.saveHighlights(highlights, for: book.id)
     }
 
     // MARK: - Navigation / bookmarks

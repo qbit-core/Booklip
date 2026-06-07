@@ -11,6 +11,7 @@ struct ReaderView: View {
     @State private var showContents = false
     @State private var showBars = true
     @State private var autoScrolling = false
+    @State private var highlightMode = false
     @State private var sessionStart = Date()
 
     init(book: Book) {
@@ -29,7 +30,7 @@ struct ReaderView: View {
             } else if book.format == .pdf {
                 PDFReaderView(document: vm.pdfDocument, background: settings.currentPreset.background, progress: $vm.progress)
             } else {
-                TextReaderView(vm: vm, settings: settings, tts: tts, showBars: $showBars, autoScrolling: $autoScrolling)
+                TextReaderView(vm: vm, settings: settings, tts: tts, showBars: $showBars, autoScrolling: $autoScrolling, highlightMode: $highlightMode)
             }
 
             if showBars {
@@ -61,6 +62,11 @@ struct ReaderView: View {
             HStack(spacing: 18) {
                 Button { showContents = true } label: {
                     Image(systemName: "list.bullet").font(.headline)
+                }
+                Button { highlightMode.toggle() } label: {
+                    Image(systemName: "highlighter")
+                        .font(.headline)
+                        .foregroundStyle(highlightMode ? .orange : .accentColor)
                 }
                 Button { vm.addBookmark() } label: {
                     Image(systemName: vm.isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")

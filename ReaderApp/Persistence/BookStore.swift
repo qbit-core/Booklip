@@ -80,6 +80,20 @@ enum BookStore {
         UserDefaults.standard.set(data, forKey: bookmarkKey(bookID))
     }
 
+    // MARK: - Highlights
+
+    static func loadHighlights(_ bookID: UUID) -> [Highlight] {
+        guard let data = UserDefaults.standard.data(forKey: "highlights_\(bookID.uuidString)"),
+              let list = try? JSONDecoder().decode([Highlight].self, from: data)
+        else { return [] }
+        return list.sorted { $0.progress < $1.progress }
+    }
+
+    static func saveHighlights(_ highlights: [Highlight], for bookID: UUID) {
+        guard let data = try? JSONEncoder().encode(highlights) else { return }
+        UserDefaults.standard.set(data, forKey: "highlights_\(bookID.uuidString)")
+    }
+
     static func loadFolders() -> [BookFolder] {
         guard let data = UserDefaults.standard.data(forKey: folderKey),
               let folders = try? JSONDecoder().decode([BookFolder].self, from: data)

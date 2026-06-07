@@ -6,6 +6,7 @@ struct TextReaderView: View {
     @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
     @Binding var autoScrolling: Bool
+    @Binding var highlightMode: Bool
 
     private var richBlocks: [ContentBlock] {
         vm.book.format == .epub ? vm.blocks : []
@@ -21,6 +22,11 @@ struct TextReaderView: View {
             embeddedFontName: settings.useEmbeddedFont ? vm.embeddedFontName : nil,
             autoScrolling: $autoScrolling,
             autoScrollSpeed: settings.autoScrollSpeed,
+            highlightMode: highlightMode,
+            highlights: vm.highlights,
+            onAddHighlight: { range, color, snippet, progress in
+                vm.addHighlight(range: range, colorName: color, snippet: snippet, progress: progress)
+            },
             progress: $vm.progress,
             spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() }
@@ -42,6 +48,9 @@ struct NativeTextView: NSViewRepresentable {
     var embeddedFontName: String?
     @Binding var autoScrolling: Bool
     var autoScrollSpeed: Double = 40
+    var highlightMode: Bool = false
+    var highlights: [Highlight] = []
+    var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -127,6 +136,11 @@ struct NativeTextView: NSViewRepresentable {
         // Always re-apply style attributes so font/color/spacing changes take effect
         if let storage = textView.textStorage, storage.length > 0 {
             storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
+            for h in highlights where NSMaxRange(h.range) <= storage.length {
+                storage.addAttribute(.backgroundColor,
+                                     value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
+                                     range: h.range)
+            }
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
     }
@@ -205,6 +219,9 @@ struct NativeTextView: UIViewRepresentable {
     var embeddedFontName: String?
     @Binding var autoScrolling: Bool
     var autoScrollSpeed: Double = 40
+    var highlightMode: Bool = false
+    var highlights: [Highlight] = []
+    var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -241,9 +258,15 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.pageEffect = pageEffect
         context.coordinator.autoScrollSpeed = autoScrollSpeed
         context.coordinator.setAutoScrolling(autoScrolling)
-        // Only restyle when text/style actually change — never on the frequent
-        // progress updates that scrolling produces.
-        let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)"
+        context.coordinator.highlightMode = highlightMode
+        context.coordinator.onAddHighlight = onAddHighlight
+        // In highlight mode allow text selection (so the user can pick a range);
+        // otherwise selection stays off so taps drive paging.
+        textView.isSelectable = highlightMode
+
+        // Only restyle when text/style/highlights actually change — never on the
+        // frequent progress updates that scrolling produces.
+        let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
             if !blocks.isEmpty { return "blocks-\(blocks.count)" }
             return text.map { "txt-\($0.count)" }
@@ -311,6 +334,7 @@ struct NativeTextView: UIViewRepresentable {
             }
             print("[EPUB] render: \(blocks.count) blocks, \(imageCount) images, \(decoded) decoded, width=\(available)")
             textView.attributedText = result
+            applyHighlights(to: textView)
             return
         }
 
@@ -328,6 +352,15 @@ struct NativeTextView: UIViewRepresentable {
         if storage.length > 0, storage.length <= Self.paragraphStyleLimit, settings.lineSpacing > 0 {
             storage.addAttribute(.paragraphStyle, value: paragraphStyle,
                                  range: NSRange(location: 0, length: storage.length))
+        }
+        applyHighlights(to: textView)
+    }
+
+    private func applyHighlights(to textView: UITextView) {
+        let storage = textView.textStorage
+        for h in highlights where NSMaxRange(h.range) <= storage.length {
+            let color = UIColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4)
+            storage.addAttribute(.backgroundColor, value: color, range: h.range)
         }
     }
 
@@ -347,6 +380,10 @@ struct NativeTextView: UIViewRepresentable {
         var autoScrollSpeed: Double = 40            // points per second
         private var displayLink: CADisplayLink?
         private var autoScrollAccumulator: CFTimeInterval = 0
+
+        // Highlights
+        var highlightMode = false
+        var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
 
         init(progress: Binding<Double>, autoScrolling: Binding<Bool>, onTap: @escaping () -> Void) {
             _progress = progress
@@ -490,6 +527,7 @@ struct NativeTextView: UIViewRepresentable {
         // Tap zones: left third = page back, right third = page forward, middle = toggle bars.
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard let tv = textView, tv.bounds.width > 0 else { onTap(); return }
+            if highlightMode { onTap(); return }   // let selection work; don't page
             let x = gesture.location(in: tv).x
             let w = tv.bounds.width
             if x < w * 0.30 {
@@ -499,6 +537,29 @@ struct NativeTextView: UIViewRepresentable {
             } else {
                 onTap()
             }
+        }
+
+        // Add a "Highlight" submenu to the selection edit menu.
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
+                      suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard range.length > 0 else { return nil }
+            let actions = HighlightColor.allCases.map { hc in
+                UIAction(title: hc.rawValue.capitalized) { [weak self] _ in
+                    guard let self, let tv = self.textView else { return }
+                    let ns = tv.textStorage.string as NSString
+                    let safe = NSRange(location: range.location,
+                                       length: min(range.length, ns.length - range.location))
+                    let snippet = String(ns.substring(with: safe).prefix(80))
+                    let prog = tv.textStorage.length > 0
+                        ? Double(safe.location) / Double(tv.textStorage.length) : 0
+                    self.onAddHighlight(safe, hc.rawValue, snippet, prog)
+                    tv.selectedRange = NSRange(location: safe.location, length: 0)
+                }
+            }
+            let highlightMenu = UIMenu(title: "Highlight",
+                                       image: UIImage(systemName: "highlighter"),
+                                       children: actions)
+            return UIMenu(children: suggestedActions + [highlightMenu])
         }
 
         private func page(_ tv: UITextView, forward: Bool) {
