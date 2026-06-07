@@ -88,7 +88,11 @@ struct LibraryView: View {
                             Button {
                                 library.sortOption = option
                             } label: {
-                                Label(option.rawValue, systemImage: library.sortOption == option ? "checkmark" : "")
+                                if library.sortOption == option {
+                                    Label(option.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(option.rawValue)
+                                }
                             }
                         }
                     } label: {
