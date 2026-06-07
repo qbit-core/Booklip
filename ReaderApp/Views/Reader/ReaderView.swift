@@ -42,8 +42,8 @@ struct ReaderView: View {
         }
         .hideNavigationBar()
         .task { vm.load() }
-        .onAppear { sessionStart = Date() }
-        .onDisappear { saveProgress() }
+        .onAppear { sessionStart = Date(); loadBookSettings() }
+        .onDisappear { saveProgress(); saveBookSettings() }
         .sheet(isPresented: $showAppearance) { AppearancePanel(settings: settings) }
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
         .sheet(isPresented: $showContents) { ContentsPanel(vm: vm) { vm.jump(to: $0) } }
@@ -124,6 +124,24 @@ struct ReaderView: View {
         ReadingStats.record(seconds: Date().timeIntervalSince(sessionStart))
         library.updateProgress(for: book.id, progress: vm.progress)
         tts.stop()
+    }
+
+    // MARK: - Per-book appearance
+
+    private func loadBookSettings() {
+        guard let s = BookStore.loadSettings(book.id) else { return }
+        settings.fontName    = s.fontName
+        settings.fontSize    = s.fontSize
+        settings.lineSpacing = s.lineSpacing
+        settings.presetId    = s.presetId
+    }
+
+    private func saveBookSettings() {
+        BookStore.saveSettings(.init(fontName: settings.fontName,
+                                     fontSize: settings.fontSize,
+                                     lineSpacing: settings.lineSpacing,
+                                     presetId: settings.presetId),
+                               for: book.id)
     }
 }
 

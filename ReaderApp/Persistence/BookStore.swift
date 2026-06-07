@@ -45,6 +45,25 @@ enum BookStore {
         do { try data.write(to: url); return coverName } catch { return nil }
     }
 
+    // MARK: - Per-book appearance settings
+
+    struct BookSettings: Codable {
+        var fontName: String
+        var fontSize: Double
+        var lineSpacing: Double
+        var presetId: String
+    }
+
+    static func loadSettings(_ bookID: UUID) -> BookSettings? {
+        guard let data = UserDefaults.standard.data(forKey: "settings_\(bookID.uuidString)") else { return nil }
+        return try? JSONDecoder().decode(BookSettings.self, from: data)
+    }
+
+    static func saveSettings(_ s: BookSettings, for bookID: UUID) {
+        guard let data = try? JSONEncoder().encode(s) else { return }
+        UserDefaults.standard.set(data, forKey: "settings_\(bookID.uuidString)")
+    }
+
     // MARK: - Bookmarks
 
     private static func bookmarkKey(_ bookID: UUID) -> String { "bookmarks_\(bookID.uuidString)" }
