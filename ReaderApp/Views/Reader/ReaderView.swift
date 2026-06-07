@@ -53,7 +53,8 @@ struct ReaderView: View {
                 Text(book.author).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Text("\(Int(vm.progress * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            // Balance the back button so the title stays centered
+            Color.clear.frame(width: 20, height: 1)
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
@@ -77,6 +78,13 @@ struct ReaderView: View {
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 12)
+
+            // Centered progress percentage, just below the bottom navigation bar
+            Text("\(Int(vm.progress * 100))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.bottom, 6)
         }
         .background(.ultraThinMaterial)
     }
