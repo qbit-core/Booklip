@@ -361,19 +361,41 @@ struct NativeTextView: UIViewRepresentable {
             }
         }
 
-        // Scroll the text to match an externally-set progress value — used for
-        // the initial position restore and for seeking via the progress bar.
-        // Skips changes that originated from our own scroll reporting so it
-        // never fights the user's manual scrolling.
+        // MARK: Character-based progress
+        // Pixel offset / contentSize is unreliable because TextKit only
+        // estimates total height until text is laid out, so the same spot can
+        // report different progress. Character position is stable.
+
+        private func charProgress(_ tv: UITextView) -> Double {
+            let total = tv.textStorage.length
+            guard total > 0 else { return 0 }
+            let p = CGPoint(x: 0, y: max(0, tv.contentOffset.y - tv.textContainerInset.top))
+            let idx = tv.layoutManager.characterIndex(for: p, in: tv.textContainer,
+                                                      fractionOfDistanceBetweenInsertionPoints: nil)
+            return min(max(Double(idx) / Double(total), 0), 1)
+        }
+
+        private func offsetForCharProgress(_ target: Double, in tv: UITextView) -> CGFloat {
+            let total = tv.textStorage.length
+            guard total > 0 else { return 0 }
+            let idx = max(0, min(Int(target * Double(total)), total - 1))
+            let glyphRange = tv.layoutManager.glyphRange(forCharacterRange: NSRange(location: idx, length: 1),
+                                                         actualCharacterRange: nil)
+            let rect = tv.layoutManager.boundingRect(forGlyphRange: glyphRange, in: tv.textContainer)
+            return rect.minY + tv.textContainerInset.top
+        }
+
+        // Scroll the text to match an externally-set progress value — initial
+        // restore and seeking via the progress bar. Skips values we ourselves
+        // reported so it never fights the user's scrolling.
         func syncProgress(_ target: Double, in textView: UITextView) {
-            let scrollable = textView.contentSize.height - textView.bounds.height
-            guard scrollable > 0 else { return }   // not laid out yet
-            // This value came from our own scroll → don't bounce back
+            guard textView.bounds.width > 0, textView.textStorage.length > 0 else { return }
             if let lr = lastReportedProgress, abs(lr - target) < 0.0015 { return }
-            let current = textView.contentOffset.y / scrollable
-            guard abs(current - target) > 0.003 else { return }
+            guard abs(charProgress(textView) - target) > 0.003 else { return }
+            let maxOffset = max(0, textView.contentSize.height - textView.bounds.height)
+            let y = min(max(0, offsetForCharProgress(target, in: textView)), maxOffset)
             isScrollingProgrammatically = true
-            textView.setContentOffset(CGPoint(x: 0, y: target * scrollable), animated: false)
+            textView.setContentOffset(CGPoint(x: 0, y: y), animated: false)
             isScrollingProgrammatically = false
         }
 
@@ -398,10 +420,9 @@ struct NativeTextView: UIViewRepresentable {
         }
 
         private func commitProgress(_ scrollView: UIScrollView) {
-            guard !isScrollingProgrammatically else { return }
-            let scrollable = scrollView.contentSize.height - scrollView.bounds.height
-            guard scrollable > 0 else { return }
-            let value = max(0, min(scrollView.contentOffset.y / scrollable, 1))
+            guard !isScrollingProgrammatically, let tv = textView else { return }
+            guard tv.bounds.width > 0, tv.textStorage.length > 0 else { return }
+            let value = charProgress(tv)
             lastReportedProgress = value   // remember so syncProgress won't bounce back
             progress = value
         }
