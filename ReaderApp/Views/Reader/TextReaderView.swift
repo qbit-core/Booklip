@@ -507,6 +507,7 @@ struct NativeTextView: UIViewRepresentable {
         // (on first open the view often has no size / contentSize yet).
         private var pendingRestore: Double?
         func scheduleRestore(_ target: Double, in textView: UITextView) {
+            print("[Restore] scheduleRestore target=\(target)")
             pendingRestore = target
             attemptRestore(in: textView, retries: 12)
         }
@@ -517,6 +518,7 @@ struct NativeTextView: UIViewRepresentable {
             if ready {
                 let y = offsetForCharProgress(target, in: tv)   // forces layout to target
                 let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+                print("[Restore] target=\(target) y=\(y) maxOffset=\(maxOffset) len=\(tv.textStorage.length) bounds=\(tv.bounds.size) content=\(tv.contentSize) retries=\(retries)")
                 // If we want a non-top position but content isn't tall enough yet,
                 // layout hasn't caught up — retry shortly.
                 if target > 0.001, maxOffset < 1, retries > 0 {
@@ -530,6 +532,7 @@ struct NativeTextView: UIViewRepresentable {
                 isScrollingProgrammatically = false
                 lastReportedProgress = target
                 pendingRestore = nil
+                print("[Restore] applied offset=\(tv.contentOffset.y)")
             } else if retries > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                     self?.attemptRestore(in: tv, retries: retries - 1)
