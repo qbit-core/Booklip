@@ -273,19 +273,22 @@ struct NativeTextView: UIViewRepresentable {
                 ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
         }()
 
-        if context.coordinator.lastStyleKey != styleKey || context.coordinator.lastContentKey != contentKey {
+        let contentChanged = context.coordinator.lastStyleKey != styleKey
+            || context.coordinator.lastContentKey != contentKey
+        if contentChanged {
             applyContent(to: textView)
             textView.backgroundColor = UIColor(settings.currentPreset.background)
             context.coordinator.lastStyleKey = styleKey
             context.coordinator.lastContentKey = contentKey
         }
 
-        // Sync scroll to progress (initial restore + seeking from the progress bar).
-        // Defer once so content layout has settled and contentSize is valid.
-        let target = progress
-        context.coordinator.syncProgress(target, in: textView)
-        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
-            coordinator?.syncProgress(target, in: textView)
+        if contentChanged {
+            // Content was (re)built — restore to the current/saved position,
+            // retrying until the text view is actually laid out.
+            context.coordinator.scheduleRestore(progress, in: textView)
+        } else {
+            // Only progress changed (e.g. dragging the bar) — seek there.
+            context.coordinator.syncProgress(progress, in: textView)
         }
 
         // TTS highlight + auto-scroll
@@ -486,6 +489,7 @@ struct NativeTextView: UIViewRepresentable {
         // restore and seeking via the progress bar. Skips values we ourselves
         // reported so it never fights the user's scrolling.
         func syncProgress(_ target: Double, in textView: UITextView) {
+            guard pendingRestore == nil else { return }   // initial restore wins
             guard textView.bounds.width > 0, textView.textStorage.length > 0 else { return }
             if let lr = lastReportedProgress, abs(lr - target) < 0.0015 { return }
             guard abs(charProgress(textView) - target) > 0.003 else { return }
@@ -497,6 +501,42 @@ struct NativeTextView: UIViewRepresentable {
             isScrollingProgrammatically = true
             textView.setContentOffset(CGPoint(x: 0, y: clamped), animated: false)
             isScrollingProgrammatically = false
+        }
+
+        // Restore to a saved position, retrying until the text view is laid out
+        // (on first open the view often has no size / contentSize yet).
+        private var pendingRestore: Double?
+        func scheduleRestore(_ target: Double, in textView: UITextView) {
+            pendingRestore = target
+            attemptRestore(in: textView, retries: 12)
+        }
+
+        private func attemptRestore(in tv: UITextView, retries: Int) {
+            guard let target = pendingRestore else { return }
+            let ready = tv.bounds.width > 0 && tv.textStorage.length > 0
+            if ready {
+                let y = offsetForCharProgress(target, in: tv)   // forces layout to target
+                let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+                // If we want a non-top position but content isn't tall enough yet,
+                // layout hasn't caught up — retry shortly.
+                if target > 0.001, maxOffset < 1, retries > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                        self?.attemptRestore(in: tv, retries: retries - 1)
+                    }
+                    return
+                }
+                isScrollingProgrammatically = true
+                tv.setContentOffset(CGPoint(x: 0, y: min(max(0, y), maxOffset)), animated: false)
+                isScrollingProgrammatically = false
+                lastReportedProgress = target
+                pendingRestore = nil
+            } else if retries > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    self?.attemptRestore(in: tv, retries: retries - 1)
+                }
+            } else {
+                pendingRestore = nil
+            }
         }
 
         // Update progress only when scrolling settles — writing the binding on
