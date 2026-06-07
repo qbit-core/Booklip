@@ -92,10 +92,11 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         sleepTimer = nil
         sleepMinutes = minutes
         guard let minutes else { return }
-        sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                self?.stop()
-                self?.sleepMinutes = nil
+        sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.stop()
+                self.sleepMinutes = nil
             }
         }
     }
