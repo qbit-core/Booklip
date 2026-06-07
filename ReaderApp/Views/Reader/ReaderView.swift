@@ -8,6 +8,7 @@ struct ReaderView: View {
     @StateObject private var tts = TTSManager()
     @State private var showAppearance = false
     @State private var showTTS = false
+    @State private var showContents = false
     @State private var showBars = true
 
     init(book: Book) {
@@ -42,6 +43,7 @@ struct ReaderView: View {
         .onDisappear { saveProgress() }
         .sheet(isPresented: $showAppearance) { AppearancePanel(settings: settings) }
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
+        .sheet(isPresented: $showContents) { ContentsPanel(vm: vm) { vm.jump(to: $0) } }
     }
 
     private var topBar: some View {
@@ -53,8 +55,16 @@ struct ReaderView: View {
                 Text(book.author).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            // Balance the back button so the title stays centered
-            Color.clear.frame(width: 20, height: 1)
+            HStack(spacing: 18) {
+                Button { showContents = true } label: {
+                    Image(systemName: "list.bullet").font(.headline)
+                }
+                Button { vm.addBookmark() } label: {
+                    Image(systemName: vm.isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
+                        .font(.headline)
+                        .foregroundStyle(vm.isCurrentPositionBookmarked ? .orange : .accentColor)
+                }
+            }
         }
         .padding(.horizontal)
         .padding(.vertical, 10)

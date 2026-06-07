@@ -33,11 +33,20 @@ struct EPUBParser: BookParser, Sendable {
 
         var fullText = ""
         var blocks: [ContentBlock] = []
+        var chapterMarks: [(title: String, offset: Int)] = []
 
-        for href in spineHrefs {
+        for (i, href) in spineHrefs.enumerated() {
             let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
             let chapterDir = (entryPath as NSString).deletingLastPathComponent
             guard let html = try? readEntry(entryPath, in: archive) else { continue }
+
+            // Record chapter start (UTF-16 offset in the concatenated text).
+            let startOffset = (fullText as NSString).length
+            let chapterTitle = firstHeading(in: html)
+                ?? (href as NSString).lastPathComponent
+                    .replacingOccurrences(of: ".xhtml", with: "")
+                    .replacingOccurrences(of: ".html", with: "")
+            chapterMarks.append((chapterTitle.isEmpty ? "Chapter \(i + 1)" : chapterTitle, startOffset))
 
             // Split the chapter HTML around <img> tags, preserving order.
             for segment in segments(of: html) {
@@ -57,11 +66,26 @@ struct EPUBParser: BookParser, Sendable {
             }
         }
 
+        let totalLen = max(1, (fullText as NSString).length)
+        let chapters = chapterMarks.map {
+            Chapter(title: $0.title, progress: Double($0.offset) / Double(totalLen))
+        }
+
         return ParsedBook(title: opf.title, author: opf.author,
                           plainText: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
                           blocks: blocks,
                           embeddedFonts: fonts,
-                          coverImage: cover)
+                          coverImage: cover,
+                          chapters: chapters)
+    }
+
+    // First heading (h1–h3) text in a chapter's HTML, used as its TOC title.
+    nonisolated private func firstHeading(in html: String) -> String? {
+        let pattern = #"<h[1-3][^>]*>([\s\S]*?)</h[1-3]>"#
+        guard let range = html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
+        let heading = stripHTML(String(html[range]))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return heading.isEmpty ? nil : String(heading.prefix(80))
     }
 
     // MARK: - Embedded fonts (+ EPUB font de-obfuscation)

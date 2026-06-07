@@ -45,6 +45,22 @@ enum BookStore {
         do { try data.write(to: url); return coverName } catch { return nil }
     }
 
+    // MARK: - Bookmarks
+
+    private static func bookmarkKey(_ bookID: UUID) -> String { "bookmarks_\(bookID.uuidString)" }
+
+    static func loadBookmarks(_ bookID: UUID) -> [Bookmark] {
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey(bookID)),
+              let list = try? JSONDecoder().decode([Bookmark].self, from: data)
+        else { return [] }
+        return list.sorted { $0.progress < $1.progress }
+    }
+
+    static func saveBookmarks(_ bookmarks: [Bookmark], for bookID: UUID) {
+        guard let data = try? JSONEncoder().encode(bookmarks) else { return }
+        UserDefaults.standard.set(data, forKey: bookmarkKey(bookID))
+    }
+
     static func loadFolders() -> [BookFolder] {
         guard let data = UserDefaults.standard.data(forKey: folderKey),
               let folders = try? JSONDecoder().decode([BookFolder].self, from: data)

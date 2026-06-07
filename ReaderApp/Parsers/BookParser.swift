@@ -11,6 +11,13 @@ enum ContentBlock: Sendable {
     case image(Data)
 }
 
+// A table-of-contents entry pointing at a fractional position in the book.
+struct Chapter: Identifiable, Hashable, Sendable {
+    var id: UUID = UUID()
+    var title: String
+    var progress: Double      // 0...1
+}
+
 struct ParsedBook: Sendable {
     var title: String
     var author: String
@@ -18,6 +25,7 @@ struct ParsedBook: Sendable {
     var blocks: [ContentBlock] = []   // rich content (EPUB); empty for plain formats
     var embeddedFonts: [Data] = []    // EPUB embedded font files (de-obfuscated TTF/OTF)
     var coverImage: Data? = nil       // EPUB cover image, if present
+    var chapters: [Chapter] = []      // table of contents
     var wordCount: Int { plainText.split(separator: " ").count }
 }
 
