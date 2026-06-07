@@ -50,6 +50,9 @@ struct LibraryView: View {
                 CloudConnectView { url in library.importBook(from: url) }
             }
             .sheet(isPresented: $showingStats) { StatsView() }
+            .readerCover(item: $library.openBook) { book in
+                ReaderView(book: book)
+            }
             .alert("New Folder", isPresented: $showingNewFolder) {
                 TextField("Folder name", text: $newFolderName)
                 Button("Create") {
@@ -383,14 +386,17 @@ struct BookCardLink: View {
     private var isList: Bool { library.viewMode == .list }
 
     var body: some View {
-        if library.isSelecting {
-            Button { library.toggleSelection(book.id) } label: { cell }
-                .buttonStyle(.plain)
-        } else {
-            NavigationLink(destination: ReaderView(book: book)) { cell }
-                .buttonStyle(.plain)
-                .contextMenu { contextMenu }
+        Button {
+            if library.isSelecting {
+                library.toggleSelection(book.id)
+            } else {
+                library.openBook = book   // opens as a full-screen cover
+            }
+        } label: {
+            cell
         }
+        .buttonStyle(.plain)
+        .contextMenu { if !library.isSelecting { contextMenu } }
     }
 
     @ViewBuilder private var cell: some View {

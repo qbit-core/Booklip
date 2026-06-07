@@ -18,6 +18,9 @@ class LibraryViewModel: ObservableObject {
     @Published var isSelecting = false
     @Published var selectedBookIDs: Set<UUID> = []
 
+    // Book currently open in the reader (presented as a full-screen cover)
+    @Published var openBook: Book?
+
     init() {
         books = BookStore.load()
         folders = BookStore.loadFolders()
