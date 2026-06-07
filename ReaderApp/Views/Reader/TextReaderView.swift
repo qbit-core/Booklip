@@ -588,6 +588,7 @@ struct NativeTextView: UIViewRepresentable {
             if highlightMode { onTap(); return }   // let selection work; don't page
             let x = gesture.location(in: tv).x
             let w = tv.bounds.width
+            print("[Tap] x=\(x) w=\(w) zone=\(x < w*0.30 ? "back" : (x > w*0.70 ? "fwd" : "mid"))")
             if x < w * 0.30 {
                 page(tv, forward: false)
             } else if x > w * 0.70 {
@@ -630,7 +631,8 @@ struct NativeTextView: UIViewRepresentable {
             // so a tap during the animation advances instead of repeating the page.
             let base = pageTargetY ?? tv.contentOffset.y
             let target = min(max(0, base + (forward ? step : -step)), maxOffset)
-            guard abs(target - base) > 1 else { return }
+            print("[Page] fwd=\(forward) base=\(base) target=\(target) offset=\(tv.contentOffset.y) max=\(maxOffset) pending=\(String(describing: pageTargetY)) prog=\(isScrollingProgrammatically)")
+            guard abs(target - base) > 1 else { print("[Page] skipped (no move)"); return }
             pageTargetY = target
 
             switch pageEffect {
