@@ -91,12 +91,19 @@ class ReaderViewModel: ObservableObject {
         // as the caller (user-interactive), avoiding priority inversion.
         do {
             if format == .pdf {
-                let doc: PDFDocument? = try await withCheckedThrowingContinuation { continuation in
+                let result: (PDFDocument?, String) = try await withCheckedThrowingContinuation { continuation in
                     DispatchQueue.global(qos: .userInteractive).async {
-                        continuation.resume(returning: PDFDocument(url: fileURL))
+                        let doc = PDFDocument(url: fileURL)
+                        // Extract text so TTS works for PDFs too.
+                        var text = ""
+                        if let doc {
+                            for i in 0..<doc.pageCount { text += (doc.page(at: i)?.string ?? "") + "\n" }
+                        }
+                        continuation.resume(returning: (doc, text))
                     }
                 }
-                pdfDocument = doc
+                pdfDocument = result.0
+                plainText = result.1
             } else {
                 let loader = BookLoader(url: fileURL, format: format)
                 let (text, attr, parsedBlocks, fonts, parsedChapters): (String, AttributedString, [ContentBlock], [Data], [Chapter]) = try await withCheckedThrowingContinuation { continuation in

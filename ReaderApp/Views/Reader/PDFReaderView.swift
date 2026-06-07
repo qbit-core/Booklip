@@ -3,10 +3,11 @@ import PDFKit
 
 struct PDFReaderView: View {
     let document: PDFDocument?
+    var background: Color = Color(white: 1)
     @Binding var progress: Double
 
     var body: some View {
-        PDFKitView(document: document, progress: $progress)
+        PDFKitView(document: document, background: background, progress: $progress)
     }
 }
 
@@ -17,6 +18,7 @@ import UIKit
 
 private struct PDFKitView: UIViewRepresentable {
     let document: PDFDocument?
+    let background: Color
     @Binding var progress: Double
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress) }
@@ -34,6 +36,7 @@ private struct PDFKitView: UIViewRepresentable {
 
     func updateUIView(_ uiView: PDFView, context: Context) {
         if uiView.document == nil { uiView.document = document }
+        uiView.backgroundColor = UIColor(background)
     }
 }
 
@@ -44,6 +47,7 @@ import AppKit
 
 private struct PDFKitView: NSViewRepresentable {
     let document: PDFDocument?
+    let background: Color
     @Binding var progress: Double
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress) }
@@ -61,6 +65,7 @@ private struct PDFKitView: NSViewRepresentable {
 
     func updateNSView(_ nsView: PDFView, context: Context) {
         if nsView.document == nil { nsView.document = document }
+        nsView.backgroundColor = NSColor(background)
     }
 }
 #endif

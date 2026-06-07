@@ -26,7 +26,7 @@ struct ReaderView: View {
             } else if let error = vm.errorMessage {
                 ContentUnavailableView("Cannot Open Book", systemImage: "exclamationmark.triangle", description: Text(error))
             } else if book.format == .pdf {
-                PDFReaderView(document: vm.pdfDocument, progress: $vm.progress)
+                PDFReaderView(document: vm.pdfDocument, background: settings.currentPreset.background, progress: $vm.progress)
             } else {
                 TextReaderView(vm: vm, settings: settings, tts: tts, showBars: $showBars, autoScrolling: $autoScrolling)
             }
