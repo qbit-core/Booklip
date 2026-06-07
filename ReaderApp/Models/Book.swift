@@ -69,8 +69,13 @@ struct Book: Identifiable, Codable {
     var dateAdded: Date = Date()
     var wordCount: Int = 0
     var folderID: UUID? = nil
+    var coverFileName: String? = nil
 
     var fileURL: URL {
         BookStore.documentsDirectory.appendingPathComponent(fileName)
+    }
+
+    var coverURL: URL? {
+        coverFileName.map { BookStore.documentsDirectory.appendingPathComponent($0) }
     }
 }

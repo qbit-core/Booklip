@@ -35,6 +35,14 @@ enum BookStore {
 
     static func delete(book: Book) {
         try? FileManager.default.removeItem(at: book.fileURL)
+        if let cover = book.coverURL { try? FileManager.default.removeItem(at: cover) }
+    }
+
+    // Saves cover image data and returns its file name.
+    static func saveCover(_ data: Data, for fileName: String) -> String? {
+        let coverName = (fileName as NSString).deletingPathExtension + "_cover.img"
+        let url = documentsDirectory.appendingPathComponent(coverName)
+        do { try data.write(to: url); return coverName } catch { return nil }
     }
 
     static func loadFolders() -> [BookFolder] {

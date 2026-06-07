@@ -430,11 +430,18 @@ private struct BookRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 4)
-                .fill(coverColor)
-                .frame(width: 40, height: 56)
-                .overlay(Text(book.format.displayName.prefix(1))
-                    .font(.caption.bold()).foregroundStyle(.white))
+            Group {
+                if let cover = BookCover.image(for: book) {
+                    cover.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(coverColor)
+                        .overlay(Text(book.format.displayName.prefix(1))
+                            .font(.caption.bold()).foregroundStyle(.white))
+                }
+            }
+            .frame(width: 40, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
             VStack(alignment: .leading, spacing: 3) {
                 Text(book.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                 Text(book.author).font(.caption).foregroundStyle(.secondary).lineLimit(1)

@@ -25,6 +25,12 @@ struct EPUBParser: BookParser, Sendable {
         // Extract (and de-obfuscate) embedded fonts.
         let fonts = extractFonts(opf.fontHrefs, base: opfBase, uid: opf.uniqueIdentifier, archive: archive)
 
+        // Extract cover image.
+        var cover: Data?
+        if let coverHref = opf.coverHref {
+            cover = try? readData(resolvePath(coverHref, relativeTo: opfBase), in: archive)
+        }
+
         var fullText = ""
         var blocks: [ContentBlock] = []
 
@@ -54,7 +60,8 @@ struct EPUBParser: BookParser, Sendable {
         return ParsedBook(title: opf.title, author: opf.author,
                           plainText: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
                           blocks: blocks,
-                          embeddedFonts: fonts)
+                          embeddedFonts: fonts,
+                          coverImage: cover)
     }
 
     // MARK: - Embedded fonts (+ EPUB font de-obfuscation)
@@ -219,6 +226,7 @@ struct EPUBParser: BookParser, Sendable {
         var hrefs: [String]
         var fontHrefs: [String]
         var uniqueIdentifier: String?
+        var coverHref: String?
     }
 
     nonisolated private func parseOPF(_ xml: String, base: String) throws -> OPFInfo {
@@ -238,12 +246,21 @@ struct EPUBParser: BookParser, Sendable {
                 return (lower.hasSuffix(".html") || lower.hasSuffix(".xhtml") || lower.hasSuffix(".htm")) ? href : nil
             }
         }
+        // Resolve cover: EPUB3 marker → EPUB2 meta id → first image as fallback.
+        var coverHref = delegate.coverImageHref
+        if coverHref == nil, let id = delegate.metaCoverID { coverHref = delegate.manifest[id] }
+        if coverHref == nil {
+            coverHref = delegate.imageHrefs.first { $0.lowercased().contains("cover") }
+                ?? delegate.imageHrefs.first
+        }
+
         return OPFInfo(
             title:  delegate.title.isEmpty  ? "Unknown" : delegate.title,
             author: delegate.creator.isEmpty ? "Unknown" : delegate.creator,
             hrefs: hrefs,
             fontHrefs: delegate.fontHrefs,
-            uniqueIdentifier: delegate.uniqueIdentifier
+            uniqueIdentifier: delegate.uniqueIdentifier,
+            coverHref: coverHref
         )
     }
 
@@ -306,6 +323,9 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
     var uniqueIDRef: String?                 // package@unique-identifier (an id)
     var identifiers: [String: String] = [:]  // id → dc:identifier value
     var spine: [String] = []                 // idrefs in reading order
+    var coverImageHref: String?              // EPUB3 properties="cover-image"
+    var metaCoverID: String?                 // EPUB2 <meta name="cover" content="id">
+    var imageHrefs: [String] = []            // all image manifest items (fallback)
 
     private var capturing: String?           // "title" / "creator" / "identifier"
     private var capturingIDKey: String?      // id attr of the identifier being captured
@@ -328,9 +348,21 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
                     || lower.hasSuffix(".ttc") {
                     fontHrefs.append(href)
                 }
+                let isImage = media.hasPrefix("image/") || lower.hasSuffix(".jpg")
+                    || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".gif")
+                if isImage { imageHrefs.append(href) }
+                // EPUB3 cover marker
+                if (attributeDict["properties"] ?? "").contains("cover-image") {
+                    coverImageHref = href
+                }
             }
         case "itemref":
             if let idref = attributeDict["idref"] { spine.append(idref) }
+        case "meta":
+            // EPUB2 cover reference: <meta name="cover" content="cover-id"/>
+            if attributeDict["name"]?.lowercased() == "cover" {
+                metaCoverID = attributeDict["content"]
+            }
         case "title", "creator":
             capturing = local; buffer = ""
         case "identifier":

@@ -127,6 +127,9 @@ class LibraryViewModel: ObservableObject {
                 var book = Book(title: title, author: parsed.author, format: format, fileName: fileName)
                 book.wordCount = parsed.wordCount
                 book.folderID = folder?.id
+                if let cover = parsed.coverImage {
+                    book.coverFileName = BookStore.saveCover(cover, for: fileName)
+                }
                 DispatchQueue.main.async {
                     self.books.append(book)
                     BookStore.save(self.books)

@@ -17,6 +17,7 @@ struct ParsedBook: Sendable {
     var plainText: String
     var blocks: [ContentBlock] = []   // rich content (EPUB); empty for plain formats
     var embeddedFonts: [Data] = []    // EPUB embedded font files (de-obfuscated TTF/OTF)
+    var coverImage: Data? = nil       // EPUB cover image, if present
     var wordCount: Int { plainText.split(separator: " ").count }
 }
 

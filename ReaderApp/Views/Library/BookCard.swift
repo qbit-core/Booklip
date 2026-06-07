@@ -6,17 +6,26 @@ struct BookCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(coverColor)
-                    .aspectRatio(2.0/3.0, contentMode: .fit)   // book-cover ratio, scales with cell width
-                Text(book.title)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .padding(4)
+                if let cover = coverImage {
+                    cover
+                        .resizable()
+                        .aspectRatio(2.0/3.0, contentMode: .fill)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(coverColor)
+                        .aspectRatio(2.0/3.0, contentMode: .fit)   // book-cover ratio, scales with cell width
+                    Text(book.title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .padding(4)
+                }
                 formatBadge
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -48,9 +57,28 @@ struct BookCard: View {
             .padding(8)
     }
 
+    private var coverImage: Image? { BookCover.image(for: book) }
+
     private var coverColor: Color {
         let colors: [Color] = [.indigo, .teal, .orange, .pink, .purple, .green, .blue]
         let index = abs(book.title.hashValue) % colors.count
         return colors[index]
+    }
+}
+
+// Cross-platform cover image loader from a saved file.
+enum BookCover {
+    static func image(for book: Book) -> Image? {
+        guard let url = book.coverURL,
+              let data = try? Data(contentsOf: url) else { return nil }
+#if os(iOS)
+        guard let ui = UIImage(data: data) else { return nil }
+        return Image(uiImage: ui)
+#elseif os(macOS)
+        guard let ns = NSImage(data: data) else { return nil }
+        return Image(nsImage: ns)
+#else
+        return nil
+#endif
     }
 }
