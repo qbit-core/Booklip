@@ -489,10 +489,13 @@ struct NativeTextView: UIViewRepresentable {
             guard textView.bounds.width > 0, textView.textStorage.length > 0 else { return }
             if let lr = lastReportedProgress, abs(lr - target) < 0.0015 { return }
             guard abs(charProgress(textView) - target) > 0.003 else { return }
+            // Compute the target offset first — boundingRect forces TextKit to lay
+            // out up to that glyph, so contentSize is accurate before we clamp.
+            let y = offsetForCharProgress(target, in: textView)
             let maxOffset = max(0, textView.contentSize.height - textView.bounds.height)
-            let y = min(max(0, offsetForCharProgress(target, in: textView)), maxOffset)
+            let clamped = min(max(0, y), maxOffset)
             isScrollingProgrammatically = true
-            textView.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+            textView.setContentOffset(CGPoint(x: 0, y: clamped), animated: false)
             isScrollingProgrammatically = false
         }
 
