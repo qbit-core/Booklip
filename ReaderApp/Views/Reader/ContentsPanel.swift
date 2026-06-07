@@ -40,11 +40,15 @@ struct ContentsPanel: View {
                         onJump(chapter.progress); dismiss()
                     } label: {
                         HStack {
-                            Text(chapter.title).lineLimit(2)
+                            Text(chapter.title)
+                                .font(chapter.level == 0 ? .body : .subheadline)
+                                .foregroundStyle(chapter.level == 0 ? .primary : .secondary)
+                                .lineLimit(2)
                             Spacer()
                             Text("\(Int(chapter.progress * 100))%")
                                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         }
+                        .padding(.leading, CGFloat(chapter.level) * 16)
                     }
                     .buttonStyle(.plain)
                 }

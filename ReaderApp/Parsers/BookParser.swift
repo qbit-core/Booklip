@@ -16,6 +16,7 @@ struct Chapter: Identifiable, Hashable, Sendable {
     var id: UUID = UUID()
     var title: String
     var progress: Double      // 0...1
+    var level: Int = 0        // nesting depth for the TOC
 }
 
 struct ParsedBook: Sendable {

@@ -34,6 +34,7 @@ struct EPUBParser: BookParser, Sendable {
         var fullText = ""
         var blocks: [ContentBlock] = []
         var chapterMarks: [(title: String, offset: Int)] = []
+        var hrefToOffset: [String: Int] = [:]   // spine href (no fragment) → start offset
 
         for (i, href) in spineHrefs.enumerated() {
             let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
@@ -42,6 +43,7 @@ struct EPUBParser: BookParser, Sendable {
 
             // Record chapter start (UTF-16 offset in the concatenated text).
             let startOffset = (fullText as NSString).length
+            hrefToOffset[(href as NSString).lastPathComponent] = startOffset
             let chapterTitle = firstHeading(in: html)
                 ?? (href as NSString).lastPathComponent
                     .replacingOccurrences(of: ".xhtml", with: "")
@@ -67,8 +69,25 @@ struct EPUBParser: BookParser, Sendable {
         }
 
         let totalLen = max(1, (fullText as NSString).length)
-        let chapters = chapterMarks.map {
-            Chapter(title: $0.title, progress: Double($0.offset) / Double(totalLen))
+
+        // Prefer a real TOC (NCX/nav) for proper titles + nesting; map each
+        // entry's target file to the spine offset we recorded. Fall back to
+        // per-spine headings.
+        var chapters: [Chapter] = []
+        if let tocEntries = parseTOC(opf: opf, base: opfBase, archive: archive), !tocEntries.isEmpty {
+            chapters = tocEntries.compactMap { entry in
+                let file = (entry.href.components(separatedBy: "#").first ?? entry.href as String)
+                let key = (file as NSString).lastPathComponent
+                guard let offset = hrefToOffset[key] else { return nil }
+                return Chapter(title: entry.title,
+                               progress: Double(offset) / Double(totalLen),
+                               level: entry.level)
+            }
+        }
+        if chapters.isEmpty {
+            chapters = chapterMarks.map {
+                Chapter(title: $0.title, progress: Double($0.offset) / Double(totalLen))
+            }
         }
 
         return ParsedBook(title: opf.title, author: opf.author,
@@ -77,6 +96,55 @@ struct EPUBParser: BookParser, Sendable {
                           embeddedFonts: fonts,
                           coverImage: cover,
                           chapters: chapters)
+    }
+
+    struct TOCEntry { var title: String; var href: String; var level: Int }
+
+    // Parse the NCX (EPUB2) or nav document (EPUB3) into a flat, ordered,
+    // level-tagged list of TOC entries.
+    nonisolated private func parseTOC(opf: OPFInfo, base: String, archive: Archive) -> [TOCEntry]? {
+        // EPUB2 NCX
+        if let ncx = opf.ncxHref,
+           let xml = try? readEntry(resolvePath(ncx, relativeTo: base), in: archive),
+           let data = xml.data(using: .utf8) {
+            let delegate = NCXDelegate()
+            let parser = XMLParser(data: data)
+            parser.delegate = delegate
+            parser.parse()
+            if !delegate.entries.isEmpty { return delegate.entries }
+        }
+        // EPUB3 nav document (regex over the toc nav's anchors)
+        if let nav = opf.navHref,
+           let html = try? readEntry(resolvePath(nav, relativeTo: base), in: archive) {
+            return parseNavHTML(html)
+        }
+        return nil
+    }
+
+    // Extracts <a href="...">label</a> entries inside the nav, using <ol>
+    // nesting depth as the level.
+    nonisolated private func parseNavHTML(_ html: String) -> [TOCEntry] {
+        let ns = html as NSString
+        var entries: [TOCEntry] = []
+        var level = 0
+        let token = try? NSRegularExpression(
+            pattern: #"<ol\b|</ol>|<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>"#,
+            options: .caseInsensitive)
+        token?.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+            guard let m else { return }
+            let frag = ns.substring(with: m.range).lowercased()
+            if frag.hasPrefix("<ol") { level += 1 }
+            else if frag.hasPrefix("</ol") { level = max(0, level - 1) }
+            else if m.numberOfRanges >= 3 {
+                let href = ns.substring(with: m.range(at: 1))
+                let label = stripHTML(ns.substring(with: m.range(at: 2)))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !label.isEmpty {
+                    entries.append(TOCEntry(title: label, href: href, level: max(0, level - 1)))
+                }
+            }
+        }
+        return entries
     }
 
     // First heading (h1–h3) text in a chapter's HTML, used as its TOC title.
@@ -251,6 +319,8 @@ struct EPUBParser: BookParser, Sendable {
         var fontHrefs: [String]
         var uniqueIdentifier: String?
         var coverHref: String?
+        var ncxHref: String?
+        var navHref: String?
     }
 
     nonisolated private func parseOPF(_ xml: String, base: String) throws -> OPFInfo {
@@ -284,7 +354,9 @@ struct EPUBParser: BookParser, Sendable {
             hrefs: hrefs,
             fontHrefs: delegate.fontHrefs,
             uniqueIdentifier: delegate.uniqueIdentifier,
-            coverHref: coverHref
+            coverHref: coverHref,
+            ncxHref: delegate.ncxHref,
+            navHref: delegate.navHref
         )
     }
 
@@ -350,6 +422,8 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
     var coverImageHref: String?              // EPUB3 properties="cover-image"
     var metaCoverID: String?                 // EPUB2 <meta name="cover" content="id">
     var imageHrefs: [String] = []            // all image manifest items (fallback)
+    var ncxHref: String?                     // EPUB2 toc.ncx
+    var navHref: String?                     // EPUB3 nav document
 
     private var capturing: String?           // "title" / "creator" / "identifier"
     private var capturingIDKey: String?      // id attr of the identifier being captured
@@ -375,10 +449,12 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
                 let isImage = media.hasPrefix("image/") || lower.hasSuffix(".jpg")
                     || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".gif")
                 if isImage { imageHrefs.append(href) }
+                let props = attributeDict["properties"] ?? ""
                 // EPUB3 cover marker
-                if (attributeDict["properties"] ?? "").contains("cover-image") {
-                    coverImageHref = href
-                }
+                if props.contains("cover-image") { coverImageHref = href }
+                // TOC documents
+                if media.contains("dtbncx") || lower.hasSuffix(".ncx") { ncxHref = href }
+                if props.contains("nav") { navHref = href }
             }
         case "itemref":
             if let idref = attributeDict["idref"] { spine.append(idref) }
@@ -416,6 +492,54 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
     var uniqueIdentifier: String? {
         if let ref = uniqueIDRef, let v = identifiers[ref] { return v }
         return identifiers.values.first
+    }
+}
+
+// Parses an NCX navMap into ordered, level-tagged TOC entries.
+nonisolated private final class NCXDelegate: NSObject, XMLParserDelegate {
+    var entries: [EPUBParser.TOCEntry] = []
+    private var depth = 0
+    private var capturingLabel = false
+    private var labelBuffer = ""
+    private var pendingTitle: String?
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?,
+                attributes attributeDict: [String: String]) {
+        let local = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
+        switch local {
+        case "navpoint":
+            depth += 1
+        case "text":
+            capturingLabel = true
+            labelBuffer = ""
+        case "content":
+            if let src = attributeDict["src"], let title = pendingTitle {
+                entries.append(.init(title: title, href: src, level: max(0, depth - 1)))
+                pendingTitle = nil
+            }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if capturingLabel { labelBuffer += string }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?) {
+        let local = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
+        switch local {
+        case "text":
+            capturingLabel = false
+            let t = labelBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if pendingTitle == nil, !t.isEmpty { pendingTitle = t }
+        case "navpoint":
+            depth = max(0, depth - 1)
+        default:
+            break
+        }
     }
 }
 
