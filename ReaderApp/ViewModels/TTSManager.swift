@@ -17,6 +17,10 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// nil when stopped. Views observe this to highlight & auto-scroll.
     @Published var spokenRange: NSRange?
 
+    /// Active sleep-timer duration in minutes (nil = off).
+    @Published var sleepMinutes: Int?
+    private var sleepTimer: Timer?
+
     private let synthesizer = AVSpeechSynthesizer()
 
     // Chunked playback state — each chunk is an exact substring of `fullText`
@@ -79,6 +83,21 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         currentChunkIndex = 0
         isPlaying = false
         spokenRange = nil
+    }
+
+    // MARK: - Sleep timer
+
+    func setSleepTimer(minutes: Int?) {
+        sleepTimer?.invalidate()
+        sleepTimer = nil
+        sleepMinutes = minutes
+        guard let minutes else { return }
+        sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.stop()
+                self?.sleepMinutes = nil
+            }
+        }
     }
 
     func togglePlayPause(text: String, currentOffset: Int) {

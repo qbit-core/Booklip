@@ -69,6 +69,24 @@ struct TTSPanel: View {
                                 .frame(width: 44, alignment: .trailing)
                         }
                     }
+
+                    // Sleep timer
+                    PanelSection(title: "Sleep Timer") {
+                        Menu {
+                            Button("Off") { tts.setSleepTimer(minutes: nil) }
+                            ForEach([5, 15, 30, 45, 60], id: \.self) { m in
+                                Button("\(m) minutes") { tts.setSleepTimer(minutes: m) }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "moon.zzz")
+                                Text(tts.sleepMinutes.map { "\($0) min" } ?? "Off")
+                                Spacer()
+                                Image(systemName: "chevron.up.chevron.down").font(.caption)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)

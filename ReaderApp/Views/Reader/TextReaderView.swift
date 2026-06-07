@@ -403,6 +403,13 @@ struct NativeTextView: UIViewRepresentable {
                 isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
                 isScrollingProgrammatically = false
+                // Follow TTS with the progress bar so closing saves the spoken
+                // position (and reopening + play resumes from there).
+                if storage.length > 0 {
+                    let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
+                    lastReportedProgress = v
+                    progress = v
+                }
             }
         }
 
