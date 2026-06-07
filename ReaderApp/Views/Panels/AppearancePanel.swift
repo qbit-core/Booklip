@@ -54,6 +54,11 @@ struct AppearancePanel: View {
                         .pickerStyle(.segmented)
                     }
 
+                    // Use the EPUB's embedded font (fixes font-obfuscated books)
+                    PanelSection(title: "EPUB") {
+                        Toggle("Use book's original font", isOn: $settings.useEmbeddedFont)
+                    }
+
                     // Preview
                     PanelSection(title: "Preview") {
                         Text("The quick brown fox jumps over the lazy dog.\n다람쥐 헌 쳇바퀴에 타고파.")

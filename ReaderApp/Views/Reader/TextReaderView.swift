@@ -17,6 +17,7 @@ struct TextReaderView: View {
             blocks: richBlocks,
             settings: settings,
             pageEffect: settings.pageEffect,
+            embeddedFontName: settings.useEmbeddedFont ? vm.embeddedFontName : nil,
             progress: $vm.progress,
             spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() }
@@ -35,6 +36,7 @@ struct NativeTextView: NSViewRepresentable {
     var blocks: [ContentBlock] = []
     let settings: ReadingSettings
     var pageEffect: PageEffect = .verticalSlide
+    var embeddedFontName: String?
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -73,7 +75,8 @@ struct NativeTextView: NSViewRepresentable {
     }
 
     private func applyContent(to textView: NSTextView) {
-        let font = NSFont(name: settings.fontName, size: settings.fontSize)
+        let fontName = embeddedFontName ?? settings.fontName
+        let font = NSFont(name: fontName, size: settings.fontSize)
             ?? NSFont.systemFont(ofSize: settings.fontSize)
         let color = NSColor(settings.currentPreset.text)
         let paragraphStyle = NSMutableParagraphStyle()
@@ -194,6 +197,7 @@ struct NativeTextView: UIViewRepresentable {
     var blocks: [ContentBlock] = []
     let settings: ReadingSettings
     var pageEffect: PageEffect = .verticalSlide
+    var embeddedFontName: String?
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
@@ -226,7 +230,7 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.pageEffect = pageEffect
         // Only restyle when text/style actually change — never on the frequent
         // progress updates that scrolling produces.
-        let styleKey = "\(settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)"
+        let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)"
         let contentKey: String = {
             if !blocks.isEmpty { return "blocks-\(blocks.count)" }
             return text.map { "txt-\($0.count)" }
@@ -254,7 +258,8 @@ struct NativeTextView: UIViewRepresentable {
     }
 
     private func applyContent(to textView: UITextView) {
-        let font = UIFont(name: settings.fontName, size: settings.fontSize)
+        let fontName = embeddedFontName ?? settings.fontName
+        let font = UIFont(name: fontName, size: settings.fontSize)
             ?? UIFont.systemFont(ofSize: settings.fontSize)
         let color = UIColor(settings.currentPreset.text)
         let paragraphStyle = NSMutableParagraphStyle()

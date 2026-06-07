@@ -1,5 +1,6 @@
 import Foundation
 import ZIPFoundation
+import CryptoKit
 
 struct EPUBParser: BookParser, Sendable {
     nonisolated init() {}
@@ -17,8 +18,12 @@ struct EPUBParser: BookParser, Sendable {
         let opfXML = try readEntry(opfPath, in: archive)
 
         let opfBase = (opfPath as NSString).deletingLastPathComponent
-        let (title, author, spineHrefs) = try parseOPF(opfXML, base: opfBase)
-        print("[EPUB] opfPath=\(opfPath) base=\(opfBase) spine=\(spineHrefs.count) first=\(spineHrefs.prefix(3))")
+        let opf = try parseOPF(opfXML, base: opfBase)
+        let spineHrefs = opf.hrefs
+        print("[EPUB] spine=\(spineHrefs.count) fonts=\(opf.fontHrefs.count)")
+
+        // Extract (and de-obfuscate) embedded fonts.
+        let fonts = extractFonts(opf.fontHrefs, base: opfBase, uid: opf.uniqueIdentifier, archive: archive)
 
         var fullText = ""
         var blocks: [ContentBlock] = []
@@ -46,9 +51,87 @@ struct EPUBParser: BookParser, Sendable {
             }
         }
 
-        return ParsedBook(title: title, author: author,
+        return ParsedBook(title: opf.title, author: opf.author,
                           plainText: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
-                          blocks: blocks)
+                          blocks: blocks,
+                          embeddedFonts: fonts)
+    }
+
+    // MARK: - Embedded fonts (+ EPUB font de-obfuscation)
+
+    nonisolated private func extractFonts(_ hrefs: [String], base: String,
+                                          uid: String?, archive: Archive) -> [Data] {
+        guard !hrefs.isEmpty else { return [] }
+
+        // Which font paths are obfuscated, and by which algorithm?
+        let obfuscation = parseEncryption(in: archive)   // path → algorithm
+
+        var fonts: [Data] = []
+        for href in hrefs {
+            let path = resolvePath(href, relativeTo: base)
+            guard var data = try? readData(path, in: archive), !data.isEmpty else { continue }
+
+            // Match the encryption entry by suffix (encryption.xml URIs may be root-relative).
+            if let algo = obfuscation.first(where: { path.hasSuffix($0.key) || $0.key.hasSuffix(path) })?.value,
+               let uid {
+                data = deobfuscate(data, uid: uid, algorithm: algo)
+            }
+            fonts.append(data)
+        }
+        return fonts
+    }
+
+    // Returns map of cipher-reference path → algorithm URI.
+    nonisolated private func parseEncryption(in archive: Archive) -> [String: String] {
+        guard let xml = try? readEntry("META-INF/encryption.xml", in: archive), !xml.isEmpty else { return [:] }
+        let ns = xml as NSString
+        var result: [String: String] = [:]
+        // Pair each <EncryptionMethod Algorithm="..."> with the following <CipherReference URI="...">
+        let pattern = #"Algorithm\s*=\s*["']([^"']+)["'][\s\S]*?URI\s*=\s*["']([^"']+)["']"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            regex.enumerateMatches(in: xml, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+                guard let m, m.numberOfRanges >= 3 else { return }
+                let algo = ns.substring(with: m.range(at: 1))
+                let uri  = (ns.substring(with: m.range(at: 2)).removingPercentEncoding ?? ns.substring(with: m.range(at: 2)))
+                result[uri] = algo
+            }
+        }
+        return result
+    }
+
+    nonisolated private func deobfuscate(_ data: Data, uid: String, algorithm: String) -> Data {
+        let key: [UInt8]
+        let prefixLength: Int
+        if algorithm.contains("idpf") {
+            // IDPF: SHA-1 of the UID with all whitespace removed.
+            let cleaned = uid.components(separatedBy: .whitespacesAndNewlines).joined()
+            key = sha1(Array(cleaned.utf8))
+            prefixLength = 1040
+        } else if algorithm.contains("adobe") {
+            // Adobe: 16 bytes from the UID's UUID hex digits.
+            let hex = uid.replacingOccurrences(of: "urn:uuid:", with: "")
+                         .replacingOccurrences(of: "-", with: "")
+            var bytes: [UInt8] = []
+            var idx = hex.startIndex
+            while idx < hex.endIndex, let next = hex.index(idx, offsetBy: 2, limitedBy: hex.endIndex) {
+                if let b = UInt8(hex[idx..<next], radix: 16) { bytes.append(b) }
+                idx = next
+            }
+            key = bytes
+            prefixLength = 1024
+        } else {
+            return data
+        }
+        guard !key.isEmpty else { return data }
+
+        var bytes = [UInt8](data)
+        let n = min(prefixLength, bytes.count)
+        for i in 0..<n { bytes[i] ^= key[i % key.count] }
+        return Data(bytes)
+    }
+
+    nonisolated private func sha1(_ bytes: [UInt8]) -> [UInt8] {
+        Array(Insecure.SHA1.hash(data: Data(bytes)))
     }
 
     // MARK: - Helpers
@@ -130,7 +213,15 @@ struct EPUBParser: BookParser, Sendable {
         return String(xml[inner]).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
     }
 
-    nonisolated private func parseOPF(_ xml: String, base: String) throws -> (title: String, author: String, hrefs: [String]) {
+    struct OPFInfo {
+        var title: String
+        var author: String
+        var hrefs: [String]
+        var fontHrefs: [String]
+        var uniqueIdentifier: String?
+    }
+
+    nonisolated private func parseOPF(_ xml: String, base: String) throws -> OPFInfo {
         guard let data = xml.data(using: .utf8) else { throw EPUBError.malformedContainer }
         let delegate = OPFDelegate()
         let parser = XMLParser(data: data)
@@ -147,9 +238,13 @@ struct EPUBParser: BookParser, Sendable {
                 return (lower.hasSuffix(".html") || lower.hasSuffix(".xhtml") || lower.hasSuffix(".htm")) ? href : nil
             }
         }
-        let title  = delegate.title.isEmpty  ? "Unknown" : delegate.title
-        let author = delegate.creator.isEmpty ? "Unknown" : delegate.creator
-        return (title, author, hrefs)
+        return OPFInfo(
+            title:  delegate.title.isEmpty  ? "Unknown" : delegate.title,
+            author: delegate.creator.isEmpty ? "Unknown" : delegate.creator,
+            hrefs: hrefs,
+            fontHrefs: delegate.fontHrefs,
+            uniqueIdentifier: delegate.uniqueIdentifier
+        )
     }
 
     nonisolated private func extractTag(_ tag: String, from xml: String) -> String? {
@@ -205,11 +300,15 @@ struct EPUBParser: BookParser, Sendable {
 nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
     var title = ""
     var creator = ""
-    var manifest: [String: String] = [:]   // id → href
-    var manifestOrder: [String] = []        // manifest ids in document order
-    var spine: [String] = []                // idrefs in reading order
+    var manifest: [String: String] = [:]    // id → href
+    var manifestOrder: [String] = []         // manifest ids in document order
+    var fontHrefs: [String] = []             // hrefs of embedded font items
+    var uniqueIDRef: String?                 // package@unique-identifier (an id)
+    var identifiers: [String: String] = [:]  // id → dc:identifier value
+    var spine: [String] = []                 // idrefs in reading order
 
-    private var capturing: String?          // "title" or "creator"
+    private var capturing: String?           // "title" / "creator" / "identifier"
+    private var capturingIDKey: String?      // id attr of the identifier being captured
     private var buffer = ""
 
     func parser(_ parser: XMLParser, didStartElement elementName: String,
@@ -217,16 +316,25 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
                 attributes attributeDict: [String: String]) {
         let local = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
         switch local {
+        case "package":
+            uniqueIDRef = attributeDict["unique-identifier"]
         case "item":
             if let id = attributeDict["id"], let href = attributeDict["href"] {
                 manifest[id] = href
                 manifestOrder.append(id)
+                let media = attributeDict["media-type"]?.lowercased() ?? ""
+                let lower = href.lowercased()
+                if media.contains("font") || lower.hasSuffix(".ttf") || lower.hasSuffix(".otf")
+                    || lower.hasSuffix(".ttc") {
+                    fontHrefs.append(href)
+                }
             }
         case "itemref":
             if let idref = attributeDict["idref"] { spine.append(idref) }
         case "title", "creator":
-            capturing = local
-            buffer = ""
+            capturing = local; buffer = ""
+        case "identifier":
+            capturing = local; capturingIDKey = attributeDict["id"]; buffer = ""
         default:
             break
         }
@@ -242,7 +350,16 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
         let value = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
         if local == "title", title.isEmpty, !value.isEmpty { title = value }
         if local == "creator", creator.isEmpty, !value.isEmpty { creator = value }
-        if local == capturing { capturing = nil; buffer = "" }
+        if local == "identifier", !value.isEmpty {
+            identifiers[capturingIDKey ?? "_\(identifiers.count)"] = value
+        }
+        if local == capturing { capturing = nil; capturingIDKey = nil; buffer = "" }
+    }
+
+    // The package's unique identifier string (used as the font de-obfuscation key).
+    var uniqueIdentifier: String? {
+        if let ref = uniqueIDRef, let v = identifiers[ref] { return v }
+        return identifiers.values.first
     }
 }
 
