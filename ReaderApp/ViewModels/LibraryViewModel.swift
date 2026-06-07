@@ -26,6 +26,23 @@ class LibraryViewModel: ObservableObject {
             viewMode = mode
         }
         migrateUUIDTitles()
+        syncFromCloud()
+        ProgressSync.startObserving { [weak self] in self?.syncFromCloud() }
+    }
+
+    // MARK: - iCloud progress sync
+
+    func syncFromCloud() {
+        var changed = false
+        for i in books.indices {
+            if let cloud = ProgressSync.newerProgress(for: books[i],
+                                                      localUpdated: books[i].progressUpdated ?? .distantPast) {
+                books[i].progress = cloud
+                books[i].progressUpdated = Date()
+                changed = true
+            }
+        }
+        if changed { BookStore.save(books) }
     }
 
     // MARK: - Selection
@@ -161,7 +178,9 @@ class LibraryViewModel: ObservableObject {
     func updateProgress(for bookID: UUID, progress: Double) {
         guard let i = books.firstIndex(where: { $0.id == bookID }) else { return }
         books[i].progress = progress
+        books[i].progressUpdated = Date()
         BookStore.save(books)
+        ProgressSync.push(books[i])
     }
 
     // MARK: - Migration

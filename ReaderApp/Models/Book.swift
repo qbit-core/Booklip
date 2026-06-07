@@ -70,6 +70,7 @@ struct Book: Identifiable, Codable {
     var wordCount: Int = 0
     var folderID: UUID? = nil
     var coverFileName: String? = nil
+    var progressUpdated: Date? = nil   // when progress was last changed (for iCloud sync)
 
     var fileURL: URL {
         BookStore.documentsDirectory.appendingPathComponent(fileName)
