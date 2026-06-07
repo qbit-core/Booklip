@@ -69,35 +69,8 @@ struct LibraryView: View {
                 Button("Done") { library.setSelecting(false) }
             } else {
                 HStack(spacing: 12) {
-                    // View mode
-                    Menu {
-                        ForEach(ViewMode.allCases) { mode in
-                            Button {
-                                library.viewMode = mode
-                            } label: {
-                                Label(mode.rawValue, systemImage: library.viewMode == mode ? "checkmark" : mode.icon)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: library.viewMode.icon)
-                    }
-
-                    // Sort
-                    Menu {
-                        ForEach(SortOption.allCases) { option in
-                            Button {
-                                library.sortOption = option
-                            } label: {
-                                if library.sortOption == option {
-                                    Label(option.rawValue, systemImage: "checkmark")
-                                } else {
-                                    Text(option.rawValue)
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                    }
+                    ViewModeMenu()
+                    SortMenu()
 
                     // Select
                     Button { library.setSelecting(true) } label: {
@@ -175,8 +148,12 @@ struct BookSelectionModifier: ViewModifier {
                     if library.isSelecting {
                         Button("Done") { library.setSelecting(false) }
                     } else {
-                        Button { library.setSelecting(true) } label: {
-                            Image(systemName: "checkmark.circle")
+                        HStack(spacing: 12) {
+                            ViewModeMenu()
+                            SortMenu()
+                            Button { library.setSelecting(true) } label: {
+                                Image(systemName: "checkmark.circle")
+                            }
                         }
                     }
                 }
@@ -186,6 +163,46 @@ struct BookSelectionModifier: ViewModifier {
 
 extension View {
     func bookSelection() -> some View { modifier(BookSelectionModifier()) }
+}
+
+// MARK: - Reusable view-mode & sort menus
+
+struct ViewModeMenu: View {
+    @EnvironmentObject private var library: LibraryViewModel
+    var body: some View {
+        Menu {
+            ForEach(ViewMode.allCases) { mode in
+                Button {
+                    library.viewMode = mode
+                } label: {
+                    Label(mode.rawValue, systemImage: library.viewMode == mode ? "checkmark" : mode.icon)
+                }
+            }
+        } label: {
+            Image(systemName: library.viewMode.icon)
+        }
+    }
+}
+
+struct SortMenu: View {
+    @EnvironmentObject private var library: LibraryViewModel
+    var body: some View {
+        Menu {
+            ForEach(SortOption.allCases) { option in
+                Button {
+                    library.sortOption = option
+                } label: {
+                    if library.sortOption == option {
+                        Label(option.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(option.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+        }
+    }
 }
 
 // MARK: - Shared books collection (grid or list, with selection)
