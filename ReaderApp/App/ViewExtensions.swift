@@ -11,7 +11,10 @@ extension View {
 
     func hideNavigationBar() -> some View {
 #if os(iOS)
-        self.navigationBarHidden(true)
+        // Hide the whole nav bar (incl. the system back button); we provide
+        // our own back control in the reader's top bar.
+        self.toolbar(.hidden, for: .navigationBar)
+            .navigationBarBackButtonHidden(true)
 #else
         self
 #endif
