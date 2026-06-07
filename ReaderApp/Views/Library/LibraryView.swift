@@ -6,6 +6,7 @@ struct LibraryView: View {
     @EnvironmentObject private var settings: ReadingSettings
     @State private var showingFilePicker = false
     @State private var showingCloudConnect = false
+    @State private var showingStats = false
     @State private var searchText = ""
     @State private var showingNewFolder = false
     @State private var newFolderName = ""
@@ -48,6 +49,7 @@ struct LibraryView: View {
             .sheet(isPresented: $showingCloudConnect) {
                 CloudConnectView { url in library.importBook(from: url) }
             }
+            .sheet(isPresented: $showingStats) { StatsView() }
             .alert("New Folder", isPresented: $showingNewFolder) {
                 TextField("Folder name", text: $newFolderName)
                 Button("Create") {
@@ -71,6 +73,10 @@ struct LibraryView: View {
                 HStack(spacing: 12) {
                     ViewModeMenu()
                     SortMenu()
+
+                    Button { showingStats = true } label: {
+                        Image(systemName: "chart.bar")
+                    }
 
                     // Select
                     Button { library.setSelecting(true) } label: {

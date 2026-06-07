@@ -11,6 +11,7 @@ struct ReaderView: View {
     @State private var showContents = false
     @State private var showBars = true
     @State private var autoScrolling = false
+    @State private var sessionStart = Date()
 
     init(book: Book) {
         self.book = book
@@ -41,6 +42,7 @@ struct ReaderView: View {
         }
         .hideNavigationBar()
         .task { vm.load() }
+        .onAppear { sessionStart = Date() }
         .onDisappear { saveProgress() }
         .sheet(isPresented: $showAppearance) { AppearancePanel(settings: settings) }
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
@@ -119,6 +121,7 @@ struct ReaderView: View {
 
     private func saveProgress() {
         autoScrolling = false
+        ReadingStats.record(seconds: Date().timeIntervalSince(sessionStart))
         library.updateProgress(for: book.id, progress: vm.progress)
         tts.stop()
     }
