@@ -210,10 +210,13 @@ struct NativeTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress, onTap: onTap) }
 
     func makeUIView(context: Context) -> UITextView {
-        // A natively scrolling UITextView lays out text lazily via TextKit,
-        // so it handles multi-million-character documents and scrolls smoothly.
-        let textView = UITextView()
+        // Force TextKit 1 (accessing layoutManager opts out of TextKit 2),
+        // which scrolls very large documents more smoothly and avoids the
+        // relayout jank seen when returning from the background.
+        let textView = UITextView(usingTextLayoutManager: false)
+        _ = textView.layoutManager
         textView.isEditable = false
+        textView.isSelectable = false      // reading view: no text selection (fixes tap-selects-text)
         textView.isScrollEnabled = true
         textView.alwaysBounceVertical = true
         textView.backgroundColor = .clear
@@ -221,7 +224,6 @@ struct NativeTextView: UIViewRepresentable {
         textView.delegate = context.coordinator
         context.coordinator.textView = textView
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
-        tap.cancelsTouchesInView = false
         textView.addGestureRecognizer(tap)
         return textView
     }
