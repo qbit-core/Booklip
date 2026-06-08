@@ -81,10 +81,17 @@ final class OneDriveService: ObservableObject {
     // MARK: - Helpers
 
     private func validAccessToken() async throws -> String {
-        guard var t = token else { throw CloudError.notSignedIn }
+        guard let t = token else { throw CloudError.notSignedIn }
         if t.isExpired {
-            t = try await OAuthSession.refresh(t, tokenURL: Self.tokenURL, clientID: CloudConfig.oneDriveClientID)
-            token = t
+            do {
+                var refreshed = try await OAuthSession.refresh(t, tokenURL: Self.tokenURL, clientID: CloudConfig.oneDriveClientID)
+                if refreshed.refreshToken == nil { refreshed.refreshToken = t.refreshToken }
+                token = refreshed
+                return refreshed.accessToken
+            } catch {
+                await MainActor.run { self.signOut() }
+                throw CloudError.notSignedIn
+            }
         }
         return t.accessToken
     }

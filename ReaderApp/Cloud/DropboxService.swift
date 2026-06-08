@@ -97,10 +97,18 @@ final class DropboxService: ObservableObject {
     // MARK: - Helpers
 
     private func validAccessToken() async throws -> String {
-        guard var t = token else { throw CloudError.notSignedIn }
+        guard let t = token else { throw CloudError.notSignedIn }
         if t.isExpired {
-            t = try await OAuthSession.refresh(t, tokenURL: Self.tokenURL, clientID: CloudConfig.dropboxClientID)
-            token = t
+            do {
+                var refreshed = try await OAuthSession.refresh(t, tokenURL: Self.tokenURL, clientID: CloudConfig.dropboxClientID)
+                if refreshed.refreshToken == nil { refreshed.refreshToken = t.refreshToken } // preserve
+                token = refreshed
+                return refreshed.accessToken
+            } catch {
+                // Session is no longer valid — reflect that in the UI.
+                await MainActor.run { self.signOut() }
+                throw CloudError.notSignedIn
+            }
         }
         return t.accessToken
     }
