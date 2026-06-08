@@ -632,7 +632,8 @@ struct NativeTextView: UIViewRepresentable {
             // so a tap during the animation advances instead of repeating the page.
             let base = pageTargetY ?? tv.contentOffset.y
             let target = min(max(0, base + (forward ? step : -step)), maxOffset)
-            guard abs(target - base) > 1 else { return }
+            print("[Page] fwd=\(forward) base=\(base) target=\(target) offsetBefore=\(tv.contentOffset.y)")
+            guard abs(target - base) > 1 else { print("[Page] skip"); return }
             pageTargetY = target
 
             // Set the offset INSTANTLY (never animated) so a growing contentSize
@@ -653,10 +654,12 @@ struct NativeTextView: UIViewRepresentable {
             CATransaction.setCompletionBlock {
                 self.isScrollingProgrammatically = false
                 self.pageTargetY = nil
+                print("[Page] completion offset=\(tv.contentOffset.y)")
                 self.commitProgress(tv)
             }
             tv.layer.add(transition, forKey: "pageTurn")
             tv.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+            print("[Page] offsetAfterSet=\(tv.contentOffset.y)")
             CATransaction.commit()
         }
     }
