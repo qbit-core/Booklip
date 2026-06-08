@@ -632,13 +632,22 @@ struct NativeTextView: UIViewRepresentable {
             // so a tap during the animation advances instead of repeating the page.
             let base = pageTargetY ?? tv.contentOffset.y
             let target = min(max(0, base + (forward ? step : -step)), maxOffset)
-            print("[Page] fwd=\(forward) base=\(base) target=\(target) offsetBefore=\(tv.contentOffset.y)")
-            guard abs(target - base) > 1 else { print("[Page] skip"); return }
-            pageTargetY = target
+            guard abs(target - base) > 1 else { return }
+
+            // Force TextKit to lay out down to the target. UITextView clamps
+            // setContentOffset to the *actually laid-out* height (not the
+            // estimated contentSize), so without this a forward page near the
+            // layout frontier snaps back to the same spot.
+            let needed = CGRect(x: 0, y: 0, width: tv.bounds.width, height: target + tv.bounds.height)
+            tv.layoutManager.ensureLayout(forBoundingRect: needed, in: tv.textContainer)
+            let liveMax = max(0, tv.contentSize.height - tv.bounds.height)
+            let finalTarget = min(target, liveMax)
+            guard abs(finalTarget - base) > 1 else { return }
+            pageTargetY = finalTarget
 
             // Set the offset INSTANTLY (never animated) so a growing contentSize
-            // from lazy TextKit layout can't cancel the scroll and revert the
-            // page. The motion is supplied by a CATransition on the layer.
+            // from lazy TextKit layout can't cancel the scroll. The motion is
+            // supplied by a CATransition on the layer.
             let transition = CATransition()
             transition.duration = 0.35
             transition.type = .push
@@ -654,12 +663,10 @@ struct NativeTextView: UIViewRepresentable {
             CATransaction.setCompletionBlock {
                 self.isScrollingProgrammatically = false
                 self.pageTargetY = nil
-                print("[Page] completion offset=\(tv.contentOffset.y)")
                 self.commitProgress(tv)
             }
             tv.layer.add(transition, forKey: "pageTurn")
-            tv.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-            print("[Page] offsetAfterSet=\(tv.contentOffset.y)")
+            tv.setContentOffset(CGPoint(x: 0, y: finalTarget), animated: false)
             CATransaction.commit()
         }
     }
