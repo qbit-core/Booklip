@@ -588,7 +588,6 @@ struct NativeTextView: UIViewRepresentable {
             if highlightMode { onTap(); return }   // let selection work; don't page
             let x = gesture.location(in: tv).x
             let w = tv.bounds.width
-            print("[Tap] x=\(x) w=\(w) zone=\(x < w*0.30 ? "back" : (x > w*0.70 ? "fwd" : "mid"))")
             if x < w * 0.30 {
                 page(tv, forward: false)
             } else if x > w * 0.70 {
@@ -631,34 +630,32 @@ struct NativeTextView: UIViewRepresentable {
             // so a tap during the animation advances instead of repeating the page.
             let base = pageTargetY ?? tv.contentOffset.y
             let target = min(max(0, base + (forward ? step : -step)), maxOffset)
-            print("[Page] fwd=\(forward) base=\(base) target=\(target) offset=\(tv.contentOffset.y) max=\(maxOffset) pending=\(String(describing: pageTargetY)) prog=\(isScrollingProgrammatically)")
-            guard abs(target - base) > 1 else { print("[Page] skipped (no move)"); return }
+            guard abs(target - base) > 1 else { return }
             pageTargetY = target
 
+            // Set the offset INSTANTLY (never animated) so a growing contentSize
+            // from lazy TextKit layout can't cancel the scroll and revert the
+            // page. The motion is supplied by a CATransition on the layer.
+            let transition = CATransition()
+            transition.duration = 0.35
+            transition.type = .push
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             switch pageEffect {
             case .verticalSlide:
-                isScrollingProgrammatically = true   // cleared in didEndScrollingAnimation
-                tv.setContentOffset(CGPoint(x: 0, y: target), animated: true)
-
+                transition.subtype = forward ? .fromBottom : .fromTop
             case .paper:
-                // Horizontal page turn (right-to-left for forward): the new page
-                // pushes in from the right while the old page slides off left.
-                isScrollingProgrammatically = true
-                let transition = CATransition()
-                transition.duration = 0.4
-                transition.type = .push
                 transition.subtype = forward ? .fromRight : .fromLeft
-                transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                CATransaction.begin()
-                CATransaction.setCompletionBlock {
-                    self.isScrollingProgrammatically = false
-                    self.pageTargetY = nil
-                    self.commitProgress(tv)
-                }
-                tv.layer.add(transition, forKey: "pageTurn")
-                tv.contentOffset = CGPoint(x: 0, y: target)
-                CATransaction.commit()
             }
+            isScrollingProgrammatically = true
+            CATransaction.begin()
+            CATransaction.setCompletionBlock {
+                self.isScrollingProgrammatically = false
+                self.pageTargetY = nil
+                self.commitProgress(tv)
+            }
+            tv.layer.add(transition, forKey: "pageTurn")
+            tv.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+            CATransaction.commit()
         }
     }
 }
