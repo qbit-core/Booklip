@@ -552,7 +552,8 @@ struct NativeTextView: UIViewRepresentable {
         // Update progress only when scrolling settles — writing the binding on
         // every frame re-renders the SwiftUI tree mid-scroll and causes jitter.
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-            pageTargetY = nil   // user took over; forget any queued page target
+            pageTargetY = nil      // user took over; forget any queued page target
+            pendingRestore = nil   // and cancel any in-flight position restore
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -623,6 +624,7 @@ struct NativeTextView: UIViewRepresentable {
         private var pageTargetY: CGFloat?   // intended offset while a turn animates
 
         private func page(_ tv: UITextView, forward: Bool) {
+            pendingRestore = nil   // user is navigating — don't let restore reset it
             // Advance ~one screenful, keeping a little overlap for reading continuity.
             let step = max(tv.bounds.height - 90, 120)
             let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
