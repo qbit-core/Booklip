@@ -625,23 +625,24 @@ struct NativeTextView: UIViewRepresentable {
 
         private func page(_ tv: UITextView, forward: Bool) {
             pendingRestore = nil   // user is navigating — don't let restore reset it
-            // Advance ~one screenful, keeping a little overlap for reading continuity.
-            let step = max(tv.bounds.height - 90, 120)
-            let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
-            // Base on the in-flight target (not the interpolating contentOffset)
-            // so a tap during the animation advances instead of repeating the page.
-            let base = pageTargetY ?? tv.contentOffset.y
-            let target = min(max(0, base + (forward ? step : -step)), maxOffset)
-            guard abs(target - base) > 1 else { return }
+            let inset = tv.textContainerInset.top
+            let visible = tv.bounds.height
+            guard visible > 0 else { return }
+            let overlap: CGFloat = 80
+            let lm = tv.layoutManager
+            let tc = tv.textContainer
 
-            // Force TextKit to lay out down to the target. UITextView clamps
-            // setContentOffset to the *actually laid-out* height (not the
-            // estimated contentSize), so without this a forward page near the
-            // layout frontier snaps back to the same spot.
-            let needed = CGRect(x: 0, y: 0, width: tv.bounds.width, height: target + tv.bounds.height)
-            tv.layoutManager.ensureLayout(forBoundingRect: needed, in: tv.textContainer)
-            let liveMax = max(0, tv.contentSize.height - tv.bounds.height)
-            let finalTarget = min(target, liveMax)
+            // Page by CHARACTER, not raw pixels: pick the glyph near the bottom
+            // of the current view (for forward) and scroll so it sits at the top.
+            // That glyph is already laid out, so the offset can't be clamped and
+            // we never force a big relayout that would shift the pixel↔char map.
+            let base = pageTargetY ?? tv.contentOffset.y
+            let refContentY = forward ? base + (visible - overlap) : base - (visible - overlap)
+            let refContainerY = max(0, refContentY - inset)
+            let glyphIdx = lm.glyphIndex(for: CGPoint(x: 0, y: refContainerY), in: tc)
+            let rect = lm.boundingRect(forGlyphRange: NSRange(location: glyphIdx, length: 1), in: tc)
+            let maxOffset = max(0, tv.contentSize.height - visible)
+            let finalTarget = min(max(0, rect.minY + inset), maxOffset)
             guard abs(finalTarget - base) > 1 else { return }
             pageTargetY = finalTarget
 
