@@ -639,6 +639,12 @@ struct NativeTextView: UIViewRepresentable {
             let base = pageTargetY ?? tv.contentOffset.y
             let refContentY = forward ? base + (visible - overlap) : base - (visible - overlap)
             let refContainerY = max(0, refContentY - inset)
+            // Lay out the region around the reference point (extends only from the
+            // current layout frontier downward — content above is untouched), so
+            // glyphIndex returns the real glyph instead of a clamped one near the
+            // frontier (which would repeat the page).
+            let ensureRect = CGRect(x: 0, y: refContainerY, width: tc.size.width, height: visible + overlap)
+            lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
             let glyphIdx = lm.glyphIndex(for: CGPoint(x: 0, y: refContainerY), in: tc)
             let rect = lm.boundingRect(forGlyphRange: NSRange(location: glyphIdx, length: 1), in: tc)
             let maxOffset = max(0, tv.contentSize.height - visible)
