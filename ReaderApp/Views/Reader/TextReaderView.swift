@@ -251,6 +251,14 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.textView = textView
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         textView.addGestureRecognizer(tap)
+
+        // Horizontal swipes page the same way as the tap zones.
+        for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
+            let swipe = UISwipeGestureRecognizer(target: context.coordinator,
+                                                 action: #selector(Coordinator.handleSwipe(_:)))
+            swipe.direction = direction
+            textView.addGestureRecognizer(swipe)
+        }
         return textView
     }
 
@@ -595,6 +603,16 @@ struct NativeTextView: UIViewRepresentable {
                 page(tv, forward: true)
             } else {
                 onTap()
+            }
+        }
+
+        // Swipe right = page forward (like tapping the right), swipe left = back.
+        @objc func handleSwipe(_ gesture: UISwipeGestureRecognizer) {
+            guard let tv = textView, tv.bounds.width > 0, !highlightMode else { return }
+            switch gesture.direction {
+            case .right: page(tv, forward: true)
+            case .left:  page(tv, forward: false)
+            default:     break
             }
         }
 
