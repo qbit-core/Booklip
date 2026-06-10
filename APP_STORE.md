@@ -1,12 +1,11 @@
 # App Store Listing
 
 ## App Name (30 char max)
-**Quiet Reader — Books & TTS**
+**Booklip — eBook Reader**
 
 Alternatives:
-- Quiet Reader: EPUB & PDF
-- ReadAloud — eBook Reader
-- Paperless — Book Reader
+- Booklip: EPUB & PDF
+- Booklip — Book Reader
 
 ## Subtitle (30 char max)
 Read EPUB, PDF, TXT aloud
@@ -22,7 +21,7 @@ Bring your own books. Read EPUB, PDF, TXT and Markdown with custom fonts, themes
 
 ## Description
 
-Quiet Reader is a clean, distraction‑free reader for the books you already own. Import your own files, make every page look exactly how you like, and listen hands‑free with built‑in text‑to‑speech.
+Booklip is a clean, distraction‑free reader for the books you already own. Import your own files, make every page look exactly how you like, and listen hands‑free with built‑in text‑to‑speech.
 
 **Read any format**
 Open EPUB, PDF, TXT, and Markdown files. EPUB embedded fonts are rendered faithfully, so even specially typeset books display correctly. Covers and images come through, and full Unicode support means Korean, English, and mixed‑language books all read beautifully.
