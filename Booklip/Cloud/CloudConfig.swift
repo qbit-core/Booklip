@@ -34,5 +34,5 @@ enum CloudConfig {
 
     // Dropbox
     static let dropboxClientID    = "btx9o6htbdzt7uo"
-    static let dropboxRedirectURI = "readerapp://auth/dropbox"
+    static let dropboxRedirectURI = "booklip://auth/dropbox"
 }
