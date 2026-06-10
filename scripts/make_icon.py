@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the ReaderApp app icon (light, dark, tinted) per Apple HIG.
+"""Generate the Booklip app icon (light, dark, tinted) per Apple HIG.
 
 Design: a white open book on a sage-green gradient — one clear focal subject,
 readable at small sizes, content kept in the safe center area. Inspired by the

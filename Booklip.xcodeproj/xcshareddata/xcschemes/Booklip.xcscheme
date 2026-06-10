@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "964E0FF82FCBDCE100FA3F85"
-               BuildableName = "ReaderApp.app"
-               BlueprintName = "ReaderApp"
-               ReferencedContainer = "container:ReaderApp.xcodeproj">
+               BuildableName = "Booklip.app"
+               BlueprintName = "Booklip"
+               ReferencedContainer = "container:Booklip.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -47,9 +47,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "964E0FF82FCBDCE100FA3F85"
-            BuildableName = "ReaderApp.app"
-            BlueprintName = "ReaderApp"
-            ReferencedContainer = "container:ReaderApp.xcodeproj">
+            BuildableName = "Booklip.app"
+            BlueprintName = "Booklip"
+            ReferencedContainer = "container:Booklip.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -64,9 +64,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "964E0FF82FCBDCE100FA3F85"
-            BuildableName = "ReaderApp.app"
-            BlueprintName = "ReaderApp"
-            ReferencedContainer = "container:ReaderApp.xcodeproj">
+            BuildableName = "Booklip.app"
+            BlueprintName = "Booklip"
+            ReferencedContainer = "container:Booklip.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

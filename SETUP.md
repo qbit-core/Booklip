@@ -9,7 +9,7 @@
 ### 1. Create Xcode Project
 1. Open Xcode → **File › New › Project**
 2. Choose **iOS › App**
-3. Product Name: `ReaderApp`
+3. Product Name: `Booklip`
 4. Interface: **SwiftUI**, Language: **Swift**
 5. Uncheck "Include Tests" (add later if needed)
 
@@ -17,12 +17,12 @@
 1. **File › Add Package Dependencies…**
 2. Enter URL: `https://github.com/weichsel/ZIPFoundation`
 3. Version: **Up to Next Major** from `0.9.19`
-4. Add to target **ReaderApp**
+4. Add to target **Booklip**
 
 ### 3. Copy Source Files
 Delete the auto-generated `ContentView.swift` and `<AppName>App.swift`.
 
-Then drag all folders from `Sources/ReaderApp/` into the Xcode project navigator:
+Then drag all folders from `Sources/Booklip/` into the Xcode project navigator:
 ```
 App/
 Models/
@@ -34,7 +34,7 @@ Views/
   Reader/
   Panels/
 ```
-Make sure **"Copy items if needed"** is checked and the target membership is set to **ReaderApp**.
+Make sure **"Copy items if needed"** is checked and the target membership is set to **Booklip**.
 
 ### 4. Configure Info.plist
 Add these keys (required for file import & audio):

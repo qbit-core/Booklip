@@ -2,7 +2,7 @@ import SwiftUI
 import Combine
 
 @main
-struct ReaderApp: App {
+struct BooklipApp: App {
     @StateObject private var library = LibraryViewModel()
     @StateObject private var settings = ReadingSettings()
 

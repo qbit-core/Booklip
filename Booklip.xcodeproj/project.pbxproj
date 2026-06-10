@@ -12,14 +12,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		964E0FF92FCBDCE100FA3F85 /* ReaderApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ReaderApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		964E0FF92FCBDCE100FA3F85 /* Booklip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Booklip.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		964E104B2FCC031000FA3F85 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		964E0FFB2FCBDCE100FA3F85 /* ReaderApp */ = {
+		964E0FFB2FCBDCE100FA3F85 /* Booklip */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = ReaderApp;
+			path = Booklip;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -40,7 +40,7 @@
 			isa = PBXGroup;
 			children = (
 				964E104B2FCC031000FA3F85 /* Assets.xcassets */,
-				964E0FFB2FCBDCE100FA3F85 /* ReaderApp */,
+				964E0FFB2FCBDCE100FA3F85 /* Booklip */,
 				964E0FFA2FCBDCE100FA3F85 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,7 +48,7 @@
 		964E0FFA2FCBDCE100FA3F85 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				964E0FF92FCBDCE100FA3F85 /* ReaderApp.app */,
+				964E0FF92FCBDCE100FA3F85 /* Booklip.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -56,9 +56,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		964E0FF82FCBDCE100FA3F85 /* ReaderApp */ = {
+		964E0FF82FCBDCE100FA3F85 /* Booklip */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 964E10042FCBDCE300FA3F85 /* Build configuration list for PBXNativeTarget "ReaderApp" */;
+			buildConfigurationList = 964E10042FCBDCE300FA3F85 /* Build configuration list for PBXNativeTarget "Booklip" */;
 			buildPhases = (
 				964E0FF52FCBDCE100FA3F85 /* Sources */,
 				964E0FF62FCBDCE100FA3F85 /* Frameworks */,
@@ -69,14 +69,14 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				964E0FFB2FCBDCE100FA3F85 /* ReaderApp */,
+				964E0FFB2FCBDCE100FA3F85 /* Booklip */,
 			);
-			name = ReaderApp;
+			name = Booklip;
 			packageProductDependencies = (
 				964E10082FCBDD4D00FA3F85 /* ZIPFoundation */,
 			);
-			productName = ReaderApp;
-			productReference = 964E0FF92FCBDCE100FA3F85 /* ReaderApp.app */;
+			productName = Booklip;
+			productReference = 964E0FF92FCBDCE100FA3F85 /* Booklip.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -94,7 +94,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 964E0FF42FCBDCE100FA3F85 /* Build configuration list for PBXProject "ReaderApp" */;
+			buildConfigurationList = 964E0FF42FCBDCE100FA3F85 /* Build configuration list for PBXProject "Booklip" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -111,7 +111,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				964E0FF82FCBDCE100FA3F85 /* ReaderApp */,
+				964E0FF82FCBDCE100FA3F85 /* Booklip */,
 			);
 		};
 /* End PBXProject section */
@@ -296,7 +296,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.6;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "qbit-core.ReaderApp";
+				PRODUCT_BUNDLE_IDENTIFIER = "qbit-core.Booklip";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
@@ -357,7 +357,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.6;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "qbit-core.ReaderApp";
+				PRODUCT_BUNDLE_IDENTIFIER = "qbit-core.Booklip";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
@@ -377,7 +377,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		964E0FF42FCBDCE100FA3F85 /* Build configuration list for PBXProject "ReaderApp" */ = {
+		964E0FF42FCBDCE100FA3F85 /* Build configuration list for PBXProject "Booklip" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				964E10022FCBDCE300FA3F85 /* Debug */,
@@ -386,7 +386,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		964E10042FCBDCE300FA3F85 /* Build configuration list for PBXNativeTarget "ReaderApp" */ = {
+		964E10042FCBDCE300FA3F85 /* Build configuration list for PBXNativeTarget "Booklip" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				964E10052FCBDCE300FA3F85 /* Debug */,

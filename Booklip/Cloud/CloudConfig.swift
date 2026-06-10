@@ -3,7 +3,7 @@
 //
 // OneDrive (Azure):
 //   1. Go to https://portal.azure.com → App registrations → New registration
-//   2. Name: ReaderApp, Supported account types: Personal Microsoft accounts
+//   2. Name: Booklip, Supported account types: Personal Microsoft accounts
 //   3. Redirect URI → Mobile and desktop → add: readerapp://auth/onedrive
 //   4. API permissions → Add → Microsoft Graph → Files.Read, offline_access
 //   5. Copy Application (client) ID below

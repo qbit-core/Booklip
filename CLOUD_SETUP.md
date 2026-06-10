@@ -2,7 +2,7 @@
 
 The app signs in with **your** Microsoft / Google account using OAuth 2.0.
 For that to work you must register an app on each platform (free) and paste
-the resulting IDs into `ReaderApp/Cloud/CloudConfig.swift`.
+the resulting IDs into `Booklip/Cloud/CloudConfig.swift`.
 
 This is a one-time setup. Takes ~15 minutes total.
 
@@ -13,7 +13,7 @@ This is a one-time setup. Takes ~15 minutes total.
 ### Register the app
 1. Open **https://portal.azure.com** → sign in
 2. Search **"App registrations"** → **+ New registration**
-3. **Name:** `ReaderApp`
+3. **Name:** `Booklip`
 4. **Supported account types:** *Personal Microsoft accounts only*
    (or "Accounts in any org directory and personal" if you also want work accounts)
 5. **Redirect URI:**
@@ -41,7 +41,7 @@ This is a one-time setup. Takes ~15 minutes total.
 
 ### Create a project & enable the API
 1. Open **https://console.cloud.google.com**
-2. Top bar → **Select a project** → **New Project** → name it `ReaderApp` → Create
+2. Top bar → **Select a project** → **New Project** → name it `Booklip` → Create
 3. **APIs & Services → Library** → search **Google Drive API** → **Enable**
 
 ### Configure the consent screen
@@ -99,7 +99,7 @@ enum CloudConfig {
 The app must declare the callback schemes so iOS routes the login redirect
 back into the app.
 
-1. Xcode → select the **ReaderApp** target → **Info** tab
+1. Xcode → select the **Booklip** target → **Info** tab
 2. Expand **URL Types** (add the section if missing) → **+** twice
 3. Entry 1 (OneDrive + Dropbox both use the `readerapp` scheme):
    - Identifier: `readerapp-auth`
