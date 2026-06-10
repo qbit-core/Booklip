@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Xcode / build
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Icon exports / archives (kept in Assets.xcassets, not the repo root)
+/app_icon_*.png
+/Booklip — eBook Reader */
