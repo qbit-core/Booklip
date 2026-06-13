@@ -48,6 +48,11 @@ struct ReaderView: View {
         .sheet(isPresented: $showAppearance) { AppearancePanel(settings: settings) }
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
         .sheet(isPresented: $showContents) { ContentsPanel(vm: vm) { vm.jump(to: $0) } }
+#if os(macOS)
+        // macOS sheet: give the reader a useful minimum size so the content area
+        // is tall enough to show text (NSTextView insets are 60 pt top+bottom).
+        .frame(minWidth: 480, minHeight: 640)
+#endif
     }
 
     private var topBar: some View {

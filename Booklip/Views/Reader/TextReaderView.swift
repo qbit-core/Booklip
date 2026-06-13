@@ -31,6 +31,9 @@ struct TextReaderView: View {
             spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() }
         )
+        // NSViewRepresentable wrapping NSScrollView has no SwiftUI intrinsic size;
+        // tell SwiftUI to give it all available space so the macOS sheet sizes properly.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -81,7 +84,24 @@ struct NativeTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let textView = scrollView.documentView as! NSTextView
-        applyContent(to: textView)
+
+        // Only rebuild content when text/style/highlights actually change — never on
+        // the frequent progress updates that scrolling produces.  Rebuilding the full
+        // attributed string on every SwiftUI tick blocks the main thread and creates a
+        // layout loop that prevents text from ever painting.
+        let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)|hl\(highlights.count)"
+        let contentKey: String = {
+            if !blocks.isEmpty { return "blocks-\(blocks.count)" }
+            return text.map { "txt-\($0.count)" }
+                ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
+        }()
+        if context.coordinator.lastStyleKey != styleKey
+            || context.coordinator.lastContentKey != contentKey {
+            applyContent(to: textView)
+            context.coordinator.lastStyleKey = styleKey
+            context.coordinator.lastContentKey = contentKey
+        }
+
         // Scroll to progress if it was changed externally (e.g. dragging the progress bar)
         context.coordinator.scrollToProgress(progress)
         let highlight = NSColor(settings.currentPreset.text).withAlphaComponent(0.18)
@@ -151,6 +171,8 @@ struct NativeTextView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
         private var lastHighlight: NSRange?
+        var lastStyleKey = ""
+        var lastContentKey = ""
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
             _progress = progress

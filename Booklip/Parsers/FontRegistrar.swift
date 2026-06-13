@@ -5,6 +5,11 @@ import Foundation
 // PostScript name. Needed to correctly render font-obfuscated books.
 enum FontRegistrar {
     private static var registered: Set<String> = []
+    // Keeps temp font files alive for the process lifetime.
+    // CTFontManagerRegisterFontsForURL(.process) holds the path reference and
+    // reads the file on demand — deleting it immediately causes CoreText to fail
+    // with "FontParser could not open filePath". The OS cleans temp files on exit.
+    private static var fontFileURLs: [URL] = []
 
     /// Registers the given font files and returns the PostScript name of the
     /// first one that registered successfully (or was already registered).
@@ -27,29 +32,32 @@ enum FontRegistrar {
 
         if registered.contains(psName) { return psName }
 
-        // Write to a temporary file so we can use CTFontManagerRegisterFontsForURL,
-        // which replaced the deprecated CTFontManagerRegisterGraphicsFont (macOS 15).
-        // CTFontManagerRegisterFontsForURL copies the font data into the process-level
-        // font registry, so the temp file can be removed immediately after the call.
+        // Write to a temp file and register via CTFontManagerRegisterFontsForURL.
+        // Important: do NOT delete the file after registration — CoreText keeps the
+        // URL reference and reads the file lazily, so removing it immediately causes
+        // a "FontParser could not open filePath" failure.  The temp directory is
+        // cleared automatically when the process exits.
         let ext = isOpenType(data) ? "otf" : "ttf"
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + "." + ext)
         guard (try? data.write(to: tmp)) != nil else { return nil }
-        defer { try? FileManager.default.removeItem(at: tmp) }
 
         var cfError: Unmanaged<CFError>?
         let ok = CTFontManagerRegisterFontsForURL(tmp as CFURL, .process, &cfError)
 
         if ok {
             registered.insert(psName)
+            fontFileURLs.append(tmp)   // keep the file alive
             return psName
         }
         // Already registered by the system or a previous call → still usable.
         if let err = cfError?.takeRetainedValue(),
            CFErrorGetCode(err) == CTFontManagerError.alreadyRegistered.rawValue {
             registered.insert(psName)
+            fontFileURLs.append(tmp)   // keep it; the URL may still be referenced
             return psName
         }
+        try? FileManager.default.removeItem(at: tmp)   // registration failed — clean up
         return nil
     }
 
