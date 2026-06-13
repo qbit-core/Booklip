@@ -91,7 +91,12 @@ struct NativeTextView: NSViewRepresentable {
         // layout loop that prevents text from ever painting.
         let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
-            if !blocks.isEmpty { return "blocks-\(blocks.count)" }
+            if !blocks.isEmpty {
+                // Include a coarse width bucket so images are re-scaled when
+                // the window is resized after the initial (zero-width) render.
+                let bucket = (Int(textView.bounds.width) / 50) * 50
+                return "blocks-\(blocks.count)-w\(bucket)"
+            }
             return text.map { "txt-\($0.count)" }
                 ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
         }()
@@ -121,7 +126,16 @@ struct NativeTextView: NSViewRepresentable {
 
         // EPUB with images: build a rich NSAttributedString from blocks
         if !blocks.isEmpty {
-            let maxWidth = textView.bounds.width - 50
+            // Fall back to scroll view or screen width when the text view hasn't
+            // been laid out yet (bounds are zero on the very first render call).
+            let available: CGFloat = {
+                let w = textView.bounds.width - 50
+                if w > 50 { return w }
+                if let sv = textView.enclosingScrollView, sv.bounds.width > 50 {
+                    return sv.bounds.width - 50
+                }
+                return (NSScreen.main?.frame.width ?? 800) - 80
+            }()
             let result = NSMutableAttributedString()
             for block in blocks {
                 switch block {
@@ -129,12 +143,12 @@ struct NativeTextView: NSViewRepresentable {
                     result.append(NSAttributedString(string: s + "\n\n", attributes: styleAttrs))
                 case .image(let data):
                     if let image = NSImage(data: data) {
+                        let scale = min(1.0, available / max(image.size.width, 1))
                         let attachment = NSTextAttachment()
-                        let cell = NSTextAttachmentCell(imageCell: image)
-                        attachment.attachmentCell = cell
-                        let w = max(1, maxWidth)
-                        let scale = min(1, w / max(image.size.width, 1))
-                        image.size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+                        attachment.image = image
+                        attachment.bounds = NSRect(x: 0, y: 0,
+                                                   width:  image.size.width  * scale,
+                                                   height: image.size.height * scale)
                         result.append(NSAttributedString(attachment: attachment))
                         result.append(NSAttributedString(string: "\n\n", attributes: styleAttrs))
                     }
