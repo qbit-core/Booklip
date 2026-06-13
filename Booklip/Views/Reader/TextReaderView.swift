@@ -79,7 +79,12 @@ struct NativeTextView: NSViewRepresentable {
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
+        context.coordinator.installKeyMonitor()
         return scrollView
+    }
+
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.removeKeyMonitor()
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -187,10 +192,40 @@ struct NativeTextView: NSViewRepresentable {
         private var lastHighlight: NSRange?
         var lastStyleKey = ""
         var lastContentKey = ""
+        private var keyMonitor: Any?
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
             _progress = progress
             self.onTap = onTap
+        }
+
+        func installKeyMonitor() {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                if event.specialKey == .rightArrow { self.navigatePage(direction: 1);  return nil }
+                if event.specialKey == .leftArrow  { self.navigatePage(direction: -1); return nil }
+                return event
+            }
+        }
+
+        func removeKeyMonitor() {
+            if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+        }
+
+        func navigatePage(direction: Int) {
+            guard let sv = scrollView else { return }
+            let pageHeight = sv.contentView.bounds.height
+            let contentHeight = sv.documentView?.frame.height ?? 0
+            let scrollable = contentHeight - pageHeight
+            guard scrollable > 0 else { return }
+            let current = sv.contentView.bounds.origin.y
+            let target = max(0, min(current + CGFloat(direction) * pageHeight, scrollable))
+            guard abs(target - current) > 1 else { return }
+            isScrollingProgrammatically = true
+            sv.contentView.scroll(to: NSPoint(x: 0, y: target))
+            sv.reflectScrolledClipView(sv.contentView)
+            isScrollingProgrammatically = false
+            DispatchQueue.main.async { self.progress = target / scrollable }
         }
 
         func updateHighlight(_ range: NSRange?, in textView: NSTextView, color: NSColor) {
