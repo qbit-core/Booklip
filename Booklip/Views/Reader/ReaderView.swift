@@ -49,9 +49,9 @@ struct ReaderView: View {
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
         .sheet(isPresented: $showContents) { ContentsPanel(vm: vm) { vm.jump(to: $0) } }
 #if os(macOS)
-        // macOS sheet: give the reader a useful minimum size so the content area
-        // is tall enough to show text (NSTextView insets are 60 pt top+bottom).
-        .frame(minWidth: 480, minHeight: 640)
+        .frame(minWidth: 480, idealWidth: 700, maxWidth: .infinity,
+               minHeight: 640, idealHeight: 900, maxHeight: .infinity)
+        .background(ReaderWindowConfigurator())
 #endif
     }
 
@@ -165,3 +165,27 @@ private struct BackButton: View {
         }
     }
 }
+
+#if os(macOS)
+import AppKit
+
+// Makes the reader sheet resizable and sets its initial size.
+// SwiftUI .sheet on macOS creates a non-resizable NSWindow by default;
+// accessing the window via NSViewRepresentable lets us mutate its styleMask.
+private struct ReaderWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            window.styleMask.insert(.resizable)
+            if window.frame.width < 600 {
+                window.setContentSize(NSSize(width: 700, height: 900))
+                window.center()
+            }
+            window.minSize = NSSize(width: 480, height: 640)
+        }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+#endif
