@@ -1,4 +1,3 @@
-import CoreGraphics
 import CoreText
 import Foundation
 
@@ -17,25 +16,46 @@ enum FontRegistrar {
     }
 
     static func register(_ data: Data) -> String? {
-        guard let provider = CGDataProvider(data: data as CFData),
-              let cgFont = CGFont(provider),
-              let psName = cgFont.postScriptName as String? else { return nil }
+        // Create font descriptors from data to obtain the PostScript name.
+        // CTFontManagerCreateFontDescriptorsFromData is the modern replacement
+        // for creating font references from in-memory data.
+        let descriptors = CTFontManagerCreateFontDescriptorsFromData(data as CFData)
+            as? [CTFontDescriptor]
+        guard let descriptor = descriptors?.first,
+              let psName = CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute) as? String
+        else { return nil }
 
         if registered.contains(psName) { return psName }
 
-        var error: Unmanaged<CFError>?
-        if CTFontManagerRegisterGraphicsFont(cgFont, &error) {
+        // Write to a temporary file so we can use CTFontManagerRegisterFontsForURL,
+        // which replaced the deprecated CTFontManagerRegisterGraphicsFont (macOS 15).
+        // CTFontManagerRegisterFontsForURL copies the font data into the process-level
+        // font registry, so the temp file can be removed immediately after the call.
+        let ext = isOpenType(data) ? "otf" : "ttf"
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + "." + ext)
+        guard (try? data.write(to: tmp)) != nil else { return nil }
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var cfError: Unmanaged<CFError>?
+        let ok = CTFontManagerRegisterFontsForURL(tmp as CFURL, .process, &cfError)
+
+        if ok {
             registered.insert(psName)
             return psName
         }
-        // Already registered by the system in a previous load → still usable.
-        if let err = error?.takeRetainedValue() {
-            let code = CFErrorGetCode(err)
-            if code == CTFontManagerError.alreadyRegistered.rawValue {
-                registered.insert(psName)
-                return psName
-            }
+        // Already registered by the system or a previous call → still usable.
+        if let err = cfError?.takeRetainedValue(),
+           CFErrorGetCode(err) == CTFontManagerError.alreadyRegistered.rawValue {
+            registered.insert(psName)
+            return psName
         }
         return nil
+    }
+
+    // OpenType/CFF fonts begin with the "OTTO" signature; everything else is TrueType.
+    private static func isOpenType(_ data: Data) -> Bool {
+        guard data.count >= 4 else { return false }
+        return data.prefix(4) == Data([0x4F, 0x54, 0x54, 0x4F])
     }
 }
