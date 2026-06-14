@@ -238,7 +238,10 @@ struct NativeTextView: NSViewRepresentable {
             lastHighlight = range
             if let r = range, NSMaxRange(r) <= storage.length {
                 storage.addAttribute(.backgroundColor, value: color, range: r)
+                // Guard the scroll so boundsChanged doesn't fire during updateNSView.
+                isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
+                isScrollingProgrammatically = false
             }
         }
 
@@ -527,10 +530,11 @@ struct NativeTextView: UIViewRepresentable {
                 isScrollingProgrammatically = false
                 // Follow TTS with the progress bar so closing saves the spoken
                 // position (and reopening + play resumes from there).
+                // Defer the write so it never fires inside updateUIView.
                 if storage.length > 0 {
                     let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
                     lastReportedProgress = v
-                    progress = v
+                    DispatchQueue.main.async { [weak self] in self?.progress = v }
                 }
             }
         }
