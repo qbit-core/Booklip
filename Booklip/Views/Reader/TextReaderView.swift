@@ -7,12 +7,42 @@ struct TextReaderView: View {
     @Binding var showBars: Bool
     @Binding var autoScrolling: Bool
     @Binding var highlightMode: Bool
+    // Fraction of total scrollable distance that one visible page occupies.
+    // Updated by the primary coordinator; drives the right column in double-page mode.
+    @State private var pageStep: Double = 0
 
     private var richBlocks: [ContentBlock] {
         vm.book.format == .epub ? vm.blocks : []
     }
 
     var body: some View {
+#if os(macOS)
+        if settings.pageColumns == 2 {
+            HStack(spacing: 0) {
+                nativeTextView(progress: $vm.progress, pageStep: $pageStep, isPrimary: true)
+                Divider()
+                nativeTextView(
+                    progress: .constant(min(vm.progress + pageStep, 1.0)),
+                    pageStep: .constant(0),
+                    isPrimary: false
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            nativeTextView(progress: $vm.progress, pageStep: $pageStep, isPrimary: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+#else
+        nativeTextView(progress: $vm.progress, pageStep: .constant(0), isPrimary: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+#endif
+    }
+
+    private func nativeTextView(
+        progress: Binding<Double>,
+        pageStep: Binding<Double>,
+        isPrimary: Bool
+    ) -> NativeTextView {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
@@ -24,16 +54,16 @@ struct TextReaderView: View {
             autoScrollSpeed: settings.autoScrollSpeed,
             highlightMode: highlightMode,
             highlights: vm.highlights,
-            onAddHighlight: { range, color, snippet, progress in
-                vm.addHighlight(range: range, colorName: color, snippet: snippet, progress: progress)
+            onAddHighlight: { range, color, snippet, p in
+                vm.addHighlight(range: range, colorName: color, snippet: snippet, progress: p)
             },
-            progress: $vm.progress,
+            progress: progress,
             spokenRange: tts.spokenRange,
-            onTap: { showBars.toggle() }
+            onTap: { showBars.toggle() },
+            pageColumns: settings.pageColumns,
+            pageStep: pageStep,
+            isPrimary: isPrimary
         )
-        // NSViewRepresentable wrapping NSScrollView has no SwiftUI intrinsic size;
-        // tell SwiftUI to give it all available space so the macOS sheet sizes properly.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -57,8 +87,13 @@ struct NativeTextView: NSViewRepresentable {
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
+    var pageColumns: Int = 1
+    var pageStep: Binding<Double> = .constant(0)
+    var isPrimary: Bool = true
 
-    func makeCoordinator() -> Coordinator { Coordinator(progress: $progress, onTap: onTap) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(progress: $progress, pageStep: pageStep, pageColumns: pageColumns, onTap: onTap, isPrimary: isPrimary)
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
@@ -72,16 +107,17 @@ struct NativeTextView: NSViewRepresentable {
         recognizer.numberOfClicksRequired = 1
         textView.addGestureRecognizer(recognizer)
         context.coordinator.scrollView = scrollView
-        // didLiveScrollNotification fires only on user-initiated gestures (trackpad,
-        // scroll wheel, scrollbar drag) — never from programmatic scrolls or layout
-        // changes inside updateNSView, so writing the progress binding here is safe.
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.didLiveScroll),
-            name: NSScrollView.didLiveScrollNotification,
-            object: scrollView
-        )
-        context.coordinator.installKeyMonitor()
+        if isPrimary {
+            // didLiveScrollNotification fires only on user-initiated gestures — never
+            // from programmatic scrolls inside updateNSView, so writing bindings is safe.
+            NotificationCenter.default.addObserver(
+                context.coordinator,
+                selector: #selector(Coordinator.didLiveScroll),
+                name: NSScrollView.didLiveScrollNotification,
+                object: scrollView
+            )
+            context.coordinator.installKeyMonitor()
+        }
         return scrollView
     }
 
@@ -189,7 +225,10 @@ struct NativeTextView: NSViewRepresentable {
 
     class Coordinator: NSObject {
         @Binding var progress: Double
+        var pageStep: Binding<Double>
+        var pageColumns: Int
         let onTap: () -> Void
+        let isPrimary: Bool
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
         private var lastHighlight: NSRange?
@@ -197,9 +236,12 @@ struct NativeTextView: NSViewRepresentable {
         var lastContentKey = ""
         private var keyMonitor: Any?
 
-        init(progress: Binding<Double>, onTap: @escaping () -> Void) {
+        init(progress: Binding<Double>, pageStep: Binding<Double>, pageColumns: Int, onTap: @escaping () -> Void, isPrimary: Bool) {
             _progress = progress
+            self.pageStep = pageStep
+            self.pageColumns = pageColumns
             self.onTap = onTap
+            self.isPrimary = isPrimary
         }
 
         func installKeyMonitor() {
@@ -222,13 +264,21 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - pageHeight
             guard scrollable > 0 else { return }
             let current = sv.contentView.bounds.origin.y
-            let target = max(0, min(current + CGFloat(direction) * pageHeight, scrollable))
+            // In double-page mode advance two pages at once so the spread turns together.
+            let step = CGFloat(pageColumns) * pageHeight
+            let target = max(0, min(current + CGFloat(direction) * step, scrollable))
             guard abs(target - current) > 1 else { return }
             isScrollingProgrammatically = true
             sv.contentView.scroll(to: NSPoint(x: 0, y: target))
             sv.reflectScrolledClipView(sv.contentView)
             isScrollingProgrammatically = false
-            DispatchQueue.main.async { self.progress = target / scrollable }
+            let capturedScrollable = scrollable
+            let capturedPageHeight = pageHeight
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.progress = target / capturedScrollable
+                self.updatePageStep(scrollable: capturedScrollable, pageHeight: capturedPageHeight)
+            }
         }
 
         func updateHighlight(_ range: NSRange?, in textView: NSTextView, color: NSColor) {
@@ -253,6 +303,12 @@ struct NativeTextView: NSViewRepresentable {
             let contentHeight = sv.documentView?.frame.height ?? 0
             let visibleHeight = sv.contentView.bounds.height
             let scrollable = contentHeight - visibleHeight
+            if scrollable > 0 {
+                // Keep the right-column offset in sync. Deferred via RunLoop so the
+                // write to pageStep doesn't land while SwiftUI is still reconciling.
+                let s = scrollable, h = visibleHeight
+                RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
+            }
             guard scrollable > 0 else { return }
 
             let targetOffset = target * scrollable
@@ -273,8 +329,17 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let offset = sv.contentView.bounds.origin.y
-            // User gesture → safe to write progress directly (not in a view update).
+            // User gesture → safe to write bindings directly (not in a view update).
             progress = max(0, min(offset / scrollable, 1))
+            updatePageStep(scrollable: scrollable, pageHeight: visibleHeight)
+        }
+
+        private func updatePageStep(scrollable: CGFloat, pageHeight: CGFloat) {
+            guard isPrimary, pageColumns > 1, scrollable > 0 else { return }
+            let newStep = Double(pageHeight / scrollable)
+            if abs(newStep - pageStep.wrappedValue) > 0.001 {
+                pageStep.wrappedValue = newStep
+            }
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { onTap() }
@@ -301,6 +366,9 @@ struct NativeTextView: UIViewRepresentable {
     @Binding var progress: Double
     var spokenRange: NSRange?
     let onTap: () -> Void
+    var pageColumns: Int = 1
+    var pageStep: Binding<Double> = .constant(0)
+    var isPrimary: Bool = true
 
     // Above this length we skip the per-character paragraph-style pass,
     // since addAttributes over the whole storage forces a synchronous

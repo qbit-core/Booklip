@@ -37,6 +37,7 @@ class ReadingSettings: ObservableObject {
     @Published var pageEffect:  PageEffect = PageEffect(rawValue: UserDefaults.standard.string(forKey: "pageEffect") ?? "") ?? .verticalSlide { didSet { UserDefaults.standard.set(pageEffect.rawValue, forKey: "pageEffect") } }
     @Published var useEmbeddedFont: Bool = UserDefaults.standard.object(forKey: "useEmbeddedFont") as? Bool ?? true { didSet { UserDefaults.standard.set(useEmbeddedFont, forKey: "useEmbeddedFont") } }
     @Published var autoScrollSpeed: Double = UserDefaults.standard.double(forKey: "autoScrollSpeed").nonZero ?? 40 { didSet { UserDefaults.standard.set(autoScrollSpeed, forKey: "autoScrollSpeed") } }
+    @Published var pageColumns: Int = max(1, UserDefaults.standard.integer(forKey: "pageColumns")) { didSet { UserDefaults.standard.set(pageColumns, forKey: "pageColumns") } }
 
     var currentPreset: ColorPreset {
         ColorPreset.all.first { $0.id == presetId } ?? ColorPreset.all[0]
