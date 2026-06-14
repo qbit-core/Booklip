@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct TextReaderView: View {
     @ObservedObject var vm: ReaderViewModel
@@ -7,9 +8,10 @@ struct TextReaderView: View {
     @Binding var showBars: Bool
     @Binding var autoScrolling: Bool
     @Binding var highlightMode: Bool
-    // Fraction of total scrollable distance that one visible page occupies.
-    // Updated by the primary coordinator; drives the right column in double-page mode.
-    @State private var pageStep: Double = 0
+    // Reference-type holder for the one-page scroll fraction. The primary coordinator
+    // holds a weak reference to this object, so it can never crash writing to a
+    // deallocated SwiftUI binding after the view is removed from the hierarchy.
+    @StateObject private var pageLayout = PageStepState()
 
     private var richBlocks: [ContentBlock] {
         vm.book.format == .epub ? vm.blocks : []
@@ -19,30 +21,25 @@ struct TextReaderView: View {
 #if os(macOS)
         if settings.pageColumns == 2 {
             HStack(spacing: 0) {
-                nativeTextView(progress: $vm.progress, pageStep: $pageStep, isPrimary: true)
+                nativeTextView(progress: $vm.progress, isPrimary: true)
                 Divider()
                 nativeTextView(
-                    progress: .constant(min(vm.progress + pageStep, 1.0)),
-                    pageStep: .constant(0),
+                    progress: .constant(min(vm.progress + pageLayout.value, 1.0)),
                     isPrimary: false
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            nativeTextView(progress: $vm.progress, pageStep: $pageStep, isPrimary: true)
+            nativeTextView(progress: $vm.progress, isPrimary: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
 #else
-        nativeTextView(progress: $vm.progress, pageStep: .constant(0), isPrimary: true)
+        nativeTextView(progress: $vm.progress, isPrimary: true)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 #endif
     }
 
-    private func nativeTextView(
-        progress: Binding<Double>,
-        pageStep: Binding<Double>,
-        isPrimary: Bool
-    ) -> NativeTextView {
+    private func nativeTextView(progress: Binding<Double>, isPrimary: Bool) -> NativeTextView {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
@@ -61,10 +58,17 @@ struct TextReaderView: View {
             spokenRange: tts.spokenRange,
             onTap: { showBars.toggle() },
             pageColumns: settings.pageColumns,
-            pageStep: pageStep,
+            pageLayout: isPrimary ? pageLayout : nil,
             isPrimary: isPrimary
         )
     }
+}
+
+// Coordinator → TextReaderView one-page-fraction channel. Using a class with a weak
+// reference in the coordinator means writes become no-ops (not crashes) if the view
+// is dismantled while a deferred block is still queued on the run loop.
+final class PageStepState: ObservableObject {
+    @Published var value: Double = 0
 }
 
 // MARK: - macOS
@@ -88,11 +92,13 @@ struct NativeTextView: NSViewRepresentable {
     var spokenRange: NSRange?
     let onTap: () -> Void
     var pageColumns: Int = 1
-    var pageStep: Binding<Double> = .constant(0)
+    var pageLayout: PageStepState? = nil
     var isPrimary: Bool = true
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(progress: $progress, pageStep: pageStep, pageColumns: pageColumns, onTap: onTap, isPrimary: isPrimary)
+        let c = Coordinator(progress: $progress, pageColumns: pageColumns, onTap: onTap, isPrimary: isPrimary)
+        c.pageLayout = pageLayout   // weak assignment — coordinator outlives the struct
+        return c
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -225,10 +231,10 @@ struct NativeTextView: NSViewRepresentable {
 
     class Coordinator: NSObject {
         @Binding var progress: Double
-        var pageStep: Binding<Double>
         var pageColumns: Int
         let onTap: () -> Void
         let isPrimary: Bool
+        weak var pageLayout: PageStepState?   // weak so dismantled views can't be crashed
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
         private var lastHighlight: NSRange?
@@ -236,9 +242,8 @@ struct NativeTextView: NSViewRepresentable {
         var lastContentKey = ""
         private var keyMonitor: Any?
 
-        init(progress: Binding<Double>, pageStep: Binding<Double>, pageColumns: Int, onTap: @escaping () -> Void, isPrimary: Bool) {
+        init(progress: Binding<Double>, pageColumns: Int, onTap: @escaping () -> Void, isPrimary: Bool) {
             _progress = progress
-            self.pageStep = pageStep
             self.pageColumns = pageColumns
             self.onTap = onTap
             self.isPrimary = isPrimary
@@ -337,8 +342,9 @@ struct NativeTextView: NSViewRepresentable {
         private func updatePageStep(scrollable: CGFloat, pageHeight: CGFloat) {
             guard isPrimary, pageColumns > 1, scrollable > 0 else { return }
             let newStep = Double(pageHeight / scrollable)
-            if abs(newStep - pageStep.wrappedValue) > 0.001 {
-                pageStep.wrappedValue = newStep
+            // pageLayout is weak — if TextReaderView was dismantled this is a no-op, not a crash.
+            if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
+                pageLayout?.value = newStep
             }
         }
 
@@ -367,7 +373,7 @@ struct NativeTextView: UIViewRepresentable {
     var spokenRange: NSRange?
     let onTap: () -> Void
     var pageColumns: Int = 1
-    var pageStep: Binding<Double> = .constant(0)
+    var pageLayout: PageStepState? = nil
     var isPrimary: Bool = true
 
     // Above this length we skip the per-character paragraph-style pass,
