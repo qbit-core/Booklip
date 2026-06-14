@@ -72,12 +72,14 @@ struct NativeTextView: NSViewRepresentable {
         recognizer.numberOfClicksRequired = 1
         textView.addGestureRecognizer(recognizer)
         context.coordinator.scrollView = scrollView
-        scrollView.contentView.postsBoundsChangedNotifications = true
+        // didLiveScrollNotification fires only on user-initiated gestures (trackpad,
+        // scroll wheel, scrollbar drag) — never from programmatic scrolls or layout
+        // changes inside updateNSView, so writing the progress binding here is safe.
         NotificationCenter.default.addObserver(
             context.coordinator,
-            selector: #selector(Coordinator.boundsChanged),
-            name: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView
+            selector: #selector(Coordinator.didLiveScroll),
+            name: NSScrollView.didLiveScrollNotification,
+            object: scrollView
         )
         context.coordinator.installKeyMonitor()
         return scrollView
@@ -85,6 +87,7 @@ struct NativeTextView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         coordinator.removeKeyMonitor()
+        NotificationCenter.default.removeObserver(coordinator)
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -263,16 +266,15 @@ struct NativeTextView: NSViewRepresentable {
             isScrollingProgrammatically = false
         }
 
-        @objc func boundsChanged(_ notification: Notification) {
-            guard !isScrollingProgrammatically, let sv = scrollView else { return }
+        @objc func didLiveScroll(_ notification: Notification) {
+            guard let sv = scrollView else { return }
             let contentHeight = sv.documentView?.frame.height ?? 0
             let visibleHeight = sv.contentView.bounds.height
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let offset = sv.contentView.bounds.origin.y
-            DispatchQueue.main.async {
-                self.progress = max(0, min(offset / scrollable, 1))
-            }
+            // User gesture → safe to write progress directly (not in a view update).
+            progress = max(0, min(offset / scrollable, 1))
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { onTap() }
