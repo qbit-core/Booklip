@@ -91,6 +91,9 @@ class Coordinator: NSObject {
               let page = view.currentPage
         else { return }
         let pageIndex = doc.index(for: page)
-        progress = Double(pageIndex) / Double(max(doc.pageCount - 1, 1))
+        let newProgress = Double(pageIndex) / Double(max(doc.pageCount - 1, 1))
+        // PDFViewPageChanged can fire during updateUIView/updateNSView when the
+        // document is first assigned — defer so we never write inside a view update.
+        DispatchQueue.main.async { [weak self] in self?.progress = newProgress }
     }
 }
