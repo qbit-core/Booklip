@@ -177,7 +177,11 @@ private struct ReaderWindowConfigurator: NSViewRepresentable {
         let view = NSView()
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-            window.styleMask.insert(.resizable)
+            // Add .titled so the window has a draggable area and traffic-light
+            // buttons; hide the title text so only the buttons are visible.
+            window.styleMask.formUnion([.titled, .resizable])
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             if window.frame.width < 600 {
                 window.setContentSize(NSSize(width: 700, height: 900))
                 window.center()
