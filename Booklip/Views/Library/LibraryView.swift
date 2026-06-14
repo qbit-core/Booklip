@@ -52,6 +52,12 @@ struct LibraryView: View {
             .sheet(isPresented: $showingStats) { StatsView() }
             .readerCover(item: $library.openBook) { book in
                 ReaderView(book: book)
+#if os(macOS)
+                // The standalone window breaks the SwiftUI environment chain;
+                // re-inject the app-level objects so ReaderView can find them.
+                    .environmentObject(library)
+                    .environmentObject(settings)
+#endif
             }
             .alert("New Folder", isPresented: $showingNewFolder) {
                 TextField("Folder name", text: $newFolderName)
