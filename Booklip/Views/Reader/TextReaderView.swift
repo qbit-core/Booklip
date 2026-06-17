@@ -124,15 +124,6 @@ struct NativeTextView: NSViewRepresentable {
             )
             context.coordinator.installKeyMonitor()
         }
-        // Detect when text is first laid out (documentView.frame.height goes from 0
-        // to real height). This is the only reliable trigger for the initial pageStep
-        // computation — scrollToProgress(0) exits early when offset is already 0.
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.documentFrameChanged),
-            name: NSView.frameDidChangeNotification,
-            object: scrollView.documentView
-        )
         return scrollView
     }
 
@@ -164,6 +155,12 @@ struct NativeTextView: NSViewRepresentable {
             applyContent(to: textView)
             context.coordinator.lastStyleKey = styleKey
             context.coordinator.lastContentKey = contentKey
+            // In double-page mode, force the text view to size itself now so that
+            // scrollToProgress (called below) sees the correct content height and
+            // can compute pageStep for the right column synchronously.
+            if isPrimary && pageColumns > 1 {
+                textView.sizeToFit()
+            }
         }
 
         // Scroll to progress if it was changed externally (e.g. dragging the progress bar)
@@ -355,20 +352,6 @@ struct NativeTextView: NSViewRepresentable {
             if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
                 pageLayout?.value = newStep
             }
-        }
-
-        @objc func documentFrameChanged(_ notification: Notification) {
-            // Guard early — cheap check, avoids work in single-page mode or secondary view.
-            guard isPrimary, pageColumns > 1 else { return }
-            guard let sv = scrollView else { return }
-            let contentHeight = sv.documentView?.frame.height ?? 0
-            let visibleHeight = sv.contentView.bounds.height
-            let scrollable = contentHeight - visibleHeight
-            guard scrollable > 0 else { return }
-            // This notification can fire during AppKit layout (which may overlap a
-            // SwiftUI update pass), so defer the @Published write via RunLoop.
-            let s = scrollable, h = visibleHeight
-            RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { onTap() }
