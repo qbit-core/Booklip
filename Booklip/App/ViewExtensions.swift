@@ -88,6 +88,10 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             self.onClose = onClose
 
             let hosting = NSHostingController(rootView: content)
+            // NSScrollView has no intrinsic size, so the hosting controller's
+            // preferred content size is near-zero. Disable auto-sizing so the
+            // window keeps the size we specify rather than collapsing on show.
+            hosting.sizingOptions = []
             let win = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 700, height: 900),
                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
