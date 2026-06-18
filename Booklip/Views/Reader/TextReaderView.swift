@@ -218,9 +218,11 @@ struct NativeTextView: NSViewRepresentable {
             context.coordinator.lastStyleKey = styleKey
             context.coordinator.lastContentKey = contentKey
             // In double-page mode, force the text view to size itself now so that
-            // scrollToProgress (called below) sees the correct content height and
-            // can compute pageStep for the right column synchronously.
-            if isPrimary && pageColumns > 1 {
+            // scrollToProgress (called below) sees the correct content height. Both
+            // columns need this: the primary so it can compute pageStep, the secondary
+            // so its scrollToProgress offset is not clamped to zero when frame.height
+            // is still unset from the initial (unforced) NSTextView layout.
+            if pageColumns > 1 {
                 textView.sizeToFit()
             }
         }
