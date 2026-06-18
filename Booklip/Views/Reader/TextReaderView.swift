@@ -56,7 +56,7 @@ struct TextReaderView: View {
             settings: settings,
             pageEffect: settings.pageEffect,
             embeddedFontName: settings.useEmbeddedFont ? vm.embeddedFontName : nil,
-            autoScrolling: $autoScrolling,
+            autoScrolling: autoScrolling,
             autoScrollSpeed: settings.autoScrollSpeed,
             highlightMode: highlightMode,
             highlights: vm.highlights,
@@ -125,7 +125,10 @@ struct NativeTextView: NSViewRepresentable {
     let settings: ReadingSettings
     var pageEffect: PageEffect = .verticalSlide
     var embeddedFontName: String?
-    @Binding var autoScrolling: Bool
+    // Plain value — macOS has no auto-scroll; keeping this as @Binding would leave
+    // a dangling binding reference if SwiftUI frees @State backing stores before
+    // releasing its internal copy of this struct.
+    var autoScrolling: Bool = false
     var autoScrollSpeed: Double = 40
     var highlightMode: Bool = false
     var highlights: [Highlight] = []
