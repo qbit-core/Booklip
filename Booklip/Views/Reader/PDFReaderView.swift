@@ -5,9 +5,10 @@ struct PDFReaderView: View {
     let document: PDFDocument?
     var background: Color = Color(white: 1)
     @Binding var progress: Double
+    var pageColumns: Int = 1
 
     var body: some View {
-        PDFKitView(document: document, background: background, progress: $progress)
+        PDFKitView(document: document, background: background, progress: $progress, pageColumns: pageColumns)
     }
 }
 
@@ -20,6 +21,7 @@ private struct PDFKitView: UIViewRepresentable {
     let document: PDFDocument?
     let background: Color
     @Binding var progress: Double
+    var pageColumns: Int = 1
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress) }
 
@@ -38,6 +40,10 @@ private struct PDFKitView: UIViewRepresentable {
         if uiView.document == nil { uiView.document = document }
         uiView.backgroundColor = UIColor(background)
     }
+
+    static func dismantleUIView(_ uiView: PDFView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator)
+    }
 }
 
 // MARK: - macOS
@@ -49,6 +55,7 @@ private struct PDFKitView: NSViewRepresentable {
     let document: PDFDocument?
     let background: Color
     @Binding var progress: Double
+    var pageColumns: Int = 1
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress) }
 
@@ -66,6 +73,13 @@ private struct PDFKitView: NSViewRepresentable {
     func updateNSView(_ nsView: PDFView, context: Context) {
         if nsView.document == nil { nsView.document = document }
         nsView.backgroundColor = NSColor(background)
+        // Switch between single and two-up layout based on the appearance setting.
+        let mode: PDFDisplayMode = pageColumns == 2 ? .twoUpContinuous : .singlePageContinuous
+        if nsView.displayMode != mode { nsView.displayMode = mode }
+    }
+
+    static func dismantleNSView(_ nsView: PDFView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator)
     }
 }
 #endif

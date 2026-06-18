@@ -128,6 +128,7 @@ struct NativeTextView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        coordinator.isDismantled = true
         coordinator.removeKeyMonitor()
         NotificationCenter.default.removeObserver(coordinator)
     }
@@ -243,6 +244,7 @@ struct NativeTextView: NSViewRepresentable {
         weak var pageLayout: PageStepState?   // weak so dismantled views can't be crashed
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
+        var isDismantled = false
         private var lastHighlight: NSRange?
         var lastStyleKey = ""
         var lastContentKey = ""
@@ -286,7 +288,7 @@ struct NativeTextView: NSViewRepresentable {
             let capturedScrollable = scrollable
             let capturedPageHeight = pageHeight
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, !self.isDismantled else { return }
                 self.progress = target / capturedScrollable
                 self.updatePageStep(scrollable: capturedScrollable, pageHeight: capturedPageHeight)
             }
@@ -334,7 +336,7 @@ struct NativeTextView: NSViewRepresentable {
         }
 
         @objc func didLiveScroll(_ notification: Notification) {
-            guard let sv = scrollView else { return }
+            guard !isDismantled, let sv = scrollView else { return }
             let contentHeight = sv.documentView?.frame.height ?? 0
             let visibleHeight = sv.contentView.bounds.height
             let scrollable = contentHeight - visibleHeight

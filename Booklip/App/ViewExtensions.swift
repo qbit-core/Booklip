@@ -99,6 +99,9 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
                 defer: false
             )
             win.contentViewController = hosting
+            // contentViewController= may resize the window if preferredContentSize
+            // is non-zero; override to guarantee our desired initial size.
+            win.setContentSize(NSSize(width: 700, height: 900))
             win.titlebarAppearsTransparent = true
             win.titleVisibility = .hidden
             win.minSize = NSSize(width: 480, height: 640)
