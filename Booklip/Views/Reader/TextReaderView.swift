@@ -123,6 +123,18 @@ struct NativeTextView: NSViewRepresentable {
                 object: scrollView
             )
             context.coordinator.installKeyMonitor()
+            if pageColumns > 1 {
+                // Observe the CLIP VIEW's frame changes (window layout, resize) so we can
+                // compute pageStep once the visible height is known. Safe: NSClipView does
+                // not fire frameDidChangeNotification during NSTextView deallocation.
+                scrollView.contentView.postsFrameChangedNotifications = true
+                NotificationCenter.default.addObserver(
+                    context.coordinator,
+                    selector: #selector(Coordinator.clipViewFrameChanged),
+                    name: NSView.frameDidChangeNotification,
+                    object: scrollView.contentView
+                )
+            }
         }
         return scrollView
     }
@@ -354,6 +366,17 @@ struct NativeTextView: NSViewRepresentable {
             if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
                 pageLayout?.value = newStep
             }
+        }
+
+        @objc func clipViewFrameChanged(_ notification: Notification) {
+            guard !isDismantled, isPrimary, pageColumns > 1 else { return }
+            guard let sv = scrollView else { return }
+            let contentHeight = sv.documentView?.frame.height ?? 0
+            let visibleHeight = sv.contentView.bounds.height
+            let scrollable = contentHeight - visibleHeight
+            guard scrollable > 0 else { return }
+            let s = scrollable, h = visibleHeight
+            RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { onTap() }
