@@ -96,8 +96,13 @@ struct NativeTextView: NSViewRepresentable {
     var isPrimary: Bool = true
 
     func makeCoordinator() -> Coordinator {
-        let c = Coordinator(progress: $progress, pageColumns: pageColumns, onTap: onTap, isPrimary: isPrimary)
-        c.pageLayout = pageLayout   // weak assignment — coordinator outlives the struct
+        let c = Coordinator(pageColumns: pageColumns, isPrimary: isPrimary)
+        c.pageLayout = pageLayout
+        // Capture bindings by value inside closures. dismantleNSView nils these out before
+        // SwiftUI tears down the backing stores, so coordinator dealloc is always safe.
+        let progressBinding = $progress
+        c.onProgressChange = { progressBinding.wrappedValue = $0 }
+        c.onTap = onTap
         return c
     }
 
@@ -141,6 +146,12 @@ struct NativeTextView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         coordinator.isDismantled = true
+        // Release SwiftUI binding captures NOW, while the view graph is still intact.
+        // The coordinator outlives the view (gesture recognizer retains it); if these
+        // closures survived into coordinator deinit they would call objc_release on
+        // already-freed @Binding / @State backing storage → crash.
+        coordinator.onProgressChange = nil
+        coordinator.onTap = {}
         coordinator.removeKeyMonitor()
         NotificationCenter.default.removeObserver(coordinator)
     }
@@ -249,9 +260,12 @@ struct NativeTextView: NSViewRepresentable {
     }
 
     class Coordinator: NSObject {
-        @Binding var progress: Double
+        // Closures instead of @Binding / let captures: dismantleNSView nils these before
+        // SwiftUI frees the backing stores, preventing objc_release from crashing on
+        // freed @Binding / @State storage during coordinator dealloc.
+        var onProgressChange: ((Double) -> Void)?
+        var onTap: () -> Void = {}
         var pageColumns: Int
-        let onTap: () -> Void
         let isPrimary: Bool
         weak var pageLayout: PageStepState?   // weak so dismantled views can't be crashed
         weak var scrollView: NSScrollView?
@@ -262,10 +276,8 @@ struct NativeTextView: NSViewRepresentable {
         var lastContentKey = ""
         private var keyMonitor: Any?
 
-        init(progress: Binding<Double>, pageColumns: Int, onTap: @escaping () -> Void, isPrimary: Bool) {
-            _progress = progress
+        init(pageColumns: Int, isPrimary: Bool) {
             self.pageColumns = pageColumns
-            self.onTap = onTap
             self.isPrimary = isPrimary
         }
 
@@ -301,7 +313,7 @@ struct NativeTextView: NSViewRepresentable {
             let capturedPageHeight = pageHeight
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isDismantled else { return }
-                self.progress = target / capturedScrollable
+                self.onProgressChange?(target / capturedScrollable)
                 self.updatePageStep(scrollable: capturedScrollable, pageHeight: capturedPageHeight)
             }
         }
@@ -354,8 +366,7 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let offset = sv.contentView.bounds.origin.y
-            // User gesture → safe to write bindings directly (not in a view update).
-            progress = max(0, min(offset / scrollable, 1))
+            onProgressChange?(max(0, min(offset / scrollable, 1)))
             updatePageStep(scrollable: scrollable, pageHeight: visibleHeight)
         }
 
