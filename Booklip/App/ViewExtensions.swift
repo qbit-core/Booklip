@@ -105,6 +105,13 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             win.titlebarAppearsTransparent = true
             win.titleVisibility = .hidden
             win.minSize = NSSize(width: 480, height: 640)
+            // Disable the window open/close animation so AppKit never creates
+            // _NSWindowTransformAnimation. That animation stores unsafe_unretained
+            // references into the window's view hierarchy; our windowWillClose handler
+            // releases NSHostingController synchronously while the animation object
+            // is still autoreleased, causing objc_release on a freed pointer when
+            // the autorelease pool drains during the next CA transaction commit.
+            win.animationBehavior = .none
             win.delegate = self
             win.center()
             win.makeKeyAndOrderFront(nil)
