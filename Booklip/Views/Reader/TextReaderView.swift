@@ -104,6 +104,9 @@ struct TextReaderView: View {
 // gesture-recognizer retain chain), writes become safe no-ops instead of crashing.
 final class PageStepState: ObservableObject {
     @Published var value: Double = 0
+    // Primary's scrollable pixel range; set before value so it is readable in the
+    // re-render that value triggers. Not @Published — no extra re-render needed.
+    var scrollable: CGFloat = 0
 }
 
 #if os(macOS)
@@ -377,20 +380,28 @@ struct NativeTextView: NSViewRepresentable {
 
         func scrollToProgress(_ target: Double) {
             guard let sv = scrollView else { return }
-            let contentHeight = sv.documentView?.frame.height ?? 0
-            let visibleHeight = sv.contentView.bounds.height
-            let scrollable = contentHeight - visibleHeight
-            if scrollable > 0 {
-                // Keep the right-column offset in sync. Deferred via RunLoop so the
-                // write to pageStep doesn't land while SwiftUI is still reconciling.
-                let s = scrollable, h = visibleHeight
-                RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
+
+            // Secondary column: use the primary's pre-computed scrollable range so
+            // the right page is shown even before the secondary's own NSTextView has
+            // finished its asynchronous layout (at which point bounds.height may
+            // still be 0, making a content-height calculation useless).
+            let scrollable: CGFloat
+            if !isPrimary, let layout = pageLayout, layout.scrollable > 0 {
+                scrollable = layout.scrollable
+            } else {
+                let contentHeight = sv.documentView?.frame.height ?? 0
+                let visibleHeight = sv.contentView.bounds.height
+                let s = contentHeight - visibleHeight
+                if s > 0 {
+                    let h = visibleHeight
+                    RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
+                }
+                guard s > 0 else { return }
+                scrollable = s
             }
-            guard scrollable > 0 else { return }
 
             let targetOffset = target * scrollable
             let currentOffset = sv.contentView.bounds.origin.y
-            // Only scroll if difference is more than 1pt (avoids feedback loop from user scrolling)
             guard abs(targetOffset - currentOffset) > 1 else { return }
 
             isScrollingProgrammatically = true
@@ -412,8 +423,10 @@ struct NativeTextView: NSViewRepresentable {
 
         private func updatePageStep(scrollable: CGFloat, pageHeight: CGFloat) {
             guard isPrimary, pageColumns > 1, scrollable > 0 else { return }
+            // Store scrollable before publishing value so the secondary column can
+            // read it in the SwiftUI re-render that value triggers.
+            pageLayout?.scrollable = scrollable
             let newStep = Double(pageHeight / scrollable)
-            // pageLayout is weak — if TextReaderView was dismantled this is a no-op, not a crash.
             if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
                 pageLayout?.value = newStep
             }
