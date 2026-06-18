@@ -52,6 +52,11 @@ extension ToolbarItemPlacement {
 #if os(macOS)
 import AppKit
 
+// Global set of item IDs that currently have an open reader window.
+// Prevents two Library windows from spawning duplicate reader windows for the
+// same book when both observe the same selectedBook binding change.
+private var _openReaderItemIDs: Set<AnyHashable> = []
+
 /// Presents content in a standalone, freely movable NSWindow instead of an
 /// attached sheet. Each distinct item ID gets its own window; closing the
 /// window sets the binding back to nil.
@@ -71,6 +76,7 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             let binding = $item
             coord.open(
                 content: AnyView(makeContent(current)),
+                itemId: newId,
                 onClose: { DispatchQueue.main.async { binding.wrappedValue = nil } }
             )
         } else {
@@ -83,7 +89,18 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         private var window: NSWindow?
         private var onClose: (() -> Void)?
 
-        func open(content: AnyView, onClose: @escaping () -> Void) {
+        func open(content: AnyView, itemId: AnyHashable, onClose: @escaping () -> Void) {
+            // If another Library window already opened a reader for this book,
+            // just bring that window forward rather than creating a second one.
+            if _openReaderItemIDs.contains(itemId) {
+                for win in NSApplication.shared.windows
+                where win.titlebarAppearsTransparent && win.isVisible {
+                    win.makeKeyAndOrderFront(nil)
+                    break
+                }
+                return
+            }
+            _openReaderItemIDs.insert(itemId)
             closeWindow()
             self.onClose = onClose
 
@@ -122,9 +139,11 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             window?.delegate = nil   // stop the delegate callback firing for our own close
             window?.close()
             window = nil
+            if let id = currentItemId { _openReaderItemIDs.remove(id) }
         }
 
         func windowWillClose(_ notification: Notification) {
+            if let id = currentItemId { _openReaderItemIDs.remove(id) }
             window = nil
             currentItemId = nil
             onClose?()

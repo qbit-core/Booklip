@@ -15,6 +15,14 @@ struct BooklipApp: App {
                 .environmentObject(library)
                 .environmentObject(settings)
         }
+#if os(macOS)
+        // Remove "New Window" from the File menu so the user can't manually
+        // open a second Library window (⌘N), which would cause duplicate
+        // reader windows when a book is opened.
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+        }
+#endif
     }
 }
 
@@ -35,6 +43,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 .appendingPathComponent("Saved Application State")
                 .appendingPathComponent("\(bundleID).savedState")
             try? FileManager.default.removeItem(at: stateURL)
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Safety net: if state restoration still managed to open extra Library
+        // windows (e.g. debug sandbox, first run before saved-state was deleted),
+        // close all but the key (front) window. Reader windows have a transparent
+        // titlebar; Library windows do not — use that to distinguish the two.
+        DispatchQueue.main.async {
+            let key = NSApplication.shared.keyWindow
+            for window in NSApplication.shared.windows
+            where window !== key && window.isVisible && !window.titlebarAppearsTransparent {
+                window.close()
+            }
         }
     }
 }
