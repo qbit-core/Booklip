@@ -8,10 +8,14 @@ struct TextReaderView: View {
     @Binding var showBars: Bool
     @Binding var autoScrolling: Bool
     @Binding var highlightMode: Bool
-    // Reference-type holder for the one-page scroll fraction. The primary coordinator
-    // holds a weak reference to this object, so it can never crash writing to a
-    // deallocated SwiftUI binding after the view is removed from the hierarchy.
     @StateObject private var pageLayout = PageStepState()
+    // Reference-type channel for scroll-position and tap events from the primary
+    // coordinator. The coordinator holds only a weak reference to this object, so it
+    // can never crash — if the view is dismantled before the coordinator is released
+    // (via AppKit's gesture-recognizer retain chain), writes just become no-ops.
+#if os(macOS)
+    @StateObject private var eventChannel = TextViewEventChannel()
+#endif
 
     private var richBlocks: [ContentBlock] {
         vm.book.format == .epub ? vm.blocks : []
@@ -19,26 +23,55 @@ struct TextReaderView: View {
 
     var body: some View {
 #if os(macOS)
-        if settings.pageColumns == 2 {
-            HStack(spacing: 0) {
-                nativeTextView(progress: $vm.progress, isPrimary: true)
-                Divider()
-                nativeTextView(
-                    progress: .constant(min(vm.progress + pageLayout.value, 1.0)),
-                    isPrimary: false
-                )
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            nativeTextView(progress: $vm.progress, isPrimary: true)
+        Group {
+            if settings.pageColumns == 2 {
+                HStack(spacing: 0) {
+                    nativeTextView(progress: vm.progress, isPrimary: true)
+                    Divider()
+                    nativeTextView(progress: min(vm.progress + pageLayout.value, 1.0),
+                                   isPrimary: false)
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                nativeTextView(progress: vm.progress, isPrimary: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
+        // Propagate coordinator scroll events → model. .dropFirst() skips the
+        // initial zero emission so we never override a book's saved progress.
+        .onReceive(eventChannel.$scrollProgress.dropFirst()) { vm.progress = $0 }
+        .onReceive(eventChannel.$tapCount.dropFirst()) { _ in showBars.toggle() }
 #else
         nativeTextView(progress: $vm.progress, isPrimary: true)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 #endif
     }
 
+#if os(macOS)
+    private func nativeTextView(progress: Double, isPrimary: Bool) -> NativeTextView {
+        NativeTextView(
+            text: vm.book.format == .markdown ? nil : vm.plainText,
+            attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
+            blocks: richBlocks,
+            settings: settings,
+            pageEffect: settings.pageEffect,
+            embeddedFontName: settings.useEmbeddedFont ? vm.embeddedFontName : nil,
+            autoScrolling: $autoScrolling,
+            autoScrollSpeed: settings.autoScrollSpeed,
+            highlightMode: highlightMode,
+            highlights: vm.highlights,
+            onAddHighlight: { range, color, snippet, p in
+                vm.addHighlight(range: range, colorName: color, snippet: snippet, progress: p)
+            },
+            progress: progress,
+            spokenRange: tts.spokenRange,
+            eventChannel: isPrimary ? eventChannel : nil,
+            pageColumns: settings.pageColumns,
+            pageLayout: isPrimary ? pageLayout : nil,
+            isPrimary: isPrimary
+        )
+    }
+#else
     private func nativeTextView(progress: Binding<Double>, isPrimary: Bool) -> NativeTextView {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
@@ -62,14 +95,23 @@ struct TextReaderView: View {
             isPrimary: isPrimary
         )
     }
+#endif
 }
 
-// Coordinator → TextReaderView one-page-fraction channel. Using a class with a weak
-// reference in the coordinator means writes become no-ops (not crashes) if the view
-// is dismantled while a deferred block is still queued on the run loop.
+// Reference-type channels for coordinator → SwiftUI communication on macOS.
+// The coordinator holds only weak references to these objects. If the view is
+// dismantled before the coordinator is finally released (e.g. via AppKit's
+// gesture-recognizer retain chain), writes become safe no-ops instead of crashing.
 final class PageStepState: ObservableObject {
     @Published var value: Double = 0
 }
+
+#if os(macOS)
+final class TextViewEventChannel: ObservableObject {
+    @Published var scrollProgress: Double = 0
+    @Published var tapCount: Int = 0
+}
+#endif
 
 // MARK: - macOS
 
@@ -88,9 +130,12 @@ struct NativeTextView: NSViewRepresentable {
     var highlightMode: Bool = false
     var highlights: [Highlight] = []
     var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
-    @Binding var progress: Double
+    var progress: Double
     var spokenRange: NSRange?
-    let onTap: () -> Void
+    // Coordinator communicates scroll position and taps back to SwiftUI via this
+    // channel. Using a weak reference in the coordinator means the coordinator can
+    // never crash accessing freed SwiftUI backing stores, regardless of teardown order.
+    var eventChannel: TextViewEventChannel? = nil
     var pageColumns: Int = 1
     var pageLayout: PageStepState? = nil
     var isPrimary: Bool = true
@@ -98,11 +143,7 @@ struct NativeTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         let c = Coordinator(pageColumns: pageColumns, isPrimary: isPrimary)
         c.pageLayout = pageLayout
-        // Capture bindings by value inside closures. dismantleNSView nils these out before
-        // SwiftUI tears down the backing stores, so coordinator dealloc is always safe.
-        let progressBinding = $progress
-        c.onProgressChange = { progressBinding.wrappedValue = $0 }
-        c.onTap = onTap
+        c.eventChannel = eventChannel
         return c
     }
 
@@ -146,12 +187,6 @@ struct NativeTextView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         coordinator.isDismantled = true
-        // Release SwiftUI binding captures NOW, while the view graph is still intact.
-        // The coordinator outlives the view (gesture recognizer retains it); if these
-        // closures survived into coordinator deinit they would call objc_release on
-        // already-freed @Binding / @State backing storage → crash.
-        coordinator.onProgressChange = nil
-        coordinator.onTap = {}
         coordinator.removeKeyMonitor()
         NotificationCenter.default.removeObserver(coordinator)
     }
@@ -260,14 +295,14 @@ struct NativeTextView: NSViewRepresentable {
     }
 
     class Coordinator: NSObject {
-        // Closures instead of @Binding / let captures: dismantleNSView nils these before
-        // SwiftUI frees the backing stores, preventing objc_release from crashing on
-        // freed @Binding / @State storage during coordinator dealloc.
-        var onProgressChange: ((Double) -> Void)?
-        var onTap: () -> Void = {}
+        // Weak references only — coordinator can outlive the SwiftUI view hierarchy
+        // (AppKit retains it via the gesture recognizer on NSTextView). Using weak
+        // references means all writes become no-ops after the view is dismantled,
+        // regardless of teardown order. No closures, no @Binding captures.
+        weak var eventChannel: TextViewEventChannel?
+        weak var pageLayout: PageStepState?
         var pageColumns: Int
         let isPrimary: Bool
-        weak var pageLayout: PageStepState?   // weak so dismantled views can't be crashed
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
         var isDismantled = false
@@ -313,7 +348,7 @@ struct NativeTextView: NSViewRepresentable {
             let capturedPageHeight = pageHeight
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isDismantled else { return }
-                self.onProgressChange?(target / capturedScrollable)
+                self.eventChannel?.scrollProgress = target / capturedScrollable
                 self.updatePageStep(scrollable: capturedScrollable, pageHeight: capturedPageHeight)
             }
         }
@@ -366,7 +401,7 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let offset = sv.contentView.bounds.origin.y
-            onProgressChange?(max(0, min(offset / scrollable, 1)))
+            eventChannel?.scrollProgress = max(0, min(offset / scrollable, 1))
             updatePageStep(scrollable: scrollable, pageHeight: visibleHeight)
         }
 
@@ -390,7 +425,7 @@ struct NativeTextView: NSViewRepresentable {
             RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
         }
 
-        @objc func handleTap(_ recognizer: NSGestureRecognizer) { onTap() }
+        @objc func handleTap(_ recognizer: NSGestureRecognizer) { eventChannel?.tapCount += 1 }
     }
 }
 
