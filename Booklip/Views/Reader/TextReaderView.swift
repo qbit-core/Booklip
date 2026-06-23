@@ -67,7 +67,10 @@ struct TextReaderView: View {
             spokenRange: tts.spokenRange,
             eventChannel: isPrimary ? eventChannel : nil,
             pageColumns: settings.pageColumns,
-            pageLayout: isPrimary ? pageLayout : nil,
+            // Both columns receive pageLayout: secondary reads .scrollable to
+            // position itself; primary is the only one that writes it (guarded
+            // by isPrimary inside updatePageStep).
+            pageLayout: pageLayout,
             isPrimary: isPrimary
         )
     }
@@ -217,17 +220,22 @@ struct NativeTextView: NSViewRepresentable {
         }()
         if context.coordinator.lastStyleKey != styleKey
             || context.coordinator.lastContentKey != contentKey {
-            applyContent(to: textView)
+            // Wrap in a local pool so that NSTextStorage / NSLayoutManager internal
+            // arrays (attribute runs, glyph tables) that AppKit autoreleases during
+            // setAttributedString / addAttributes / sizeToFit are drained HERE —
+            // while NSFont, NSColor, NSTextAttachment, etc. are still retained by
+            // the new text storage. Without this, those arrays linger in the main
+            // run-loop pool; when the window closes, NSTextStorage is freed first
+            // (releasing the objects), and the pool drain later tries to release them
+            // a second time → EXC_BAD_ACCESS in objc_release / NSArrayM.dealloc.
+            autoreleasepool {
+                applyContent(to: textView)
+                // In double-page mode, force a synchronous layout so scrollToProgress
+                // below sees the correct content height for both columns.
+                if pageColumns > 1 { textView.sizeToFit() }
+            }
             context.coordinator.lastStyleKey = styleKey
             context.coordinator.lastContentKey = contentKey
-            // In double-page mode, force the text view to size itself now so that
-            // scrollToProgress (called below) sees the correct content height. Both
-            // columns need this: the primary so it can compute pageStep, the secondary
-            // so its scrollToProgress offset is not clamped to zero when frame.height
-            // is still unset from the initial (unforced) NSTextView layout.
-            if pageColumns > 1 {
-                textView.sizeToFit()
-            }
         }
 
         // Scroll to progress if it was changed externally (e.g. dragging the progress bar)
