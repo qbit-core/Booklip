@@ -144,26 +144,41 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
 
         func windowWillClose(_ notification: Notification) {
             if let id = currentItemId { _openReaderItemIDs.remove(id) }
-            // Clear every NSTextView in the window before releasing the hierarchy.
-            // NSTextStorage autoreleases its internal attribute-run arrays during
-            // dealloc; if those arrays outlive the objects they reference (fonts,
-            // images, attachments) in the main run-loop pool, objc_release fires on
-            // a freed pointer → EXC_BAD_ACCESS in NSArrayM.dealloc.
-            // Replacing content with an empty string here empties the attribute arrays
-            // while NSTextStorage is still live, so its dealloc becomes trivial.
             if let contentView = window?.contentView {
                 clearNSTextViews(in: contentView)
             }
+            // The NSApplication inner autorelease pool (created per run-loop iteration
+            // inside NSApplication.run) drains AFTER this event handler returns but
+            // BEFORE the next run-loop iteration. NSLayoutManager stores its glyph and
+            // line-fragment arrays and also autoreleases references to them via internal
+            // accessor methods; if we nil `window` here those arrays are freed by
+            // dealloc while the pool still holds a reference, so the pool drain calls
+            // objc_release on freed memory → EXC_BAD_ACCESS in NSArrayM.dealloc.
+            // By holding the window alive via `deferred` until the GCD block fires
+            // (next run-loop iteration, after the pool has already drained), all
+            // autoreleased references are released while the objects are still alive.
+            let deferred = window
             window = nil
             currentItemId = nil
             onClose?()
             onClose = nil
+            DispatchQueue.main.async { _ = deferred }
         }
 
         private func clearNSTextViews(in view: NSView) {
-            autoreleasepool {
-                for sub in view.subviews { clearNSTextViews(in: sub) }
-                if let tv = view as? NSTextView {
+            for sub in view.subviews { clearNSTextViews(in: sub) }
+            if let tv = view as? NSTextView {
+                autoreleasepool {
+                    // Invalidate NSLayoutManager's glyph and layout caches before
+                    // clearing the text storage. This releases the cached arrays now
+                    // (while our pool is active and objects are still alive) instead
+                    // of deferring to dealloc, where they could race the pool drain.
+                    if let lm = tv.layoutManager, let ts = tv.textStorage, ts.length > 0 {
+                        lm.invalidateGlyphs(forCharacterRange: NSRange(location: 0, length: ts.length),
+                                            changeInLength: 0, actualCharacterRange: nil)
+                        lm.invalidateLayout(forCharacterRange: NSRange(location: 0, length: ts.length),
+                                            actualCharacterRange: nil)
+                    }
                     tv.textStorage?.setAttributedString(NSAttributedString(string: ""))
                 }
             }

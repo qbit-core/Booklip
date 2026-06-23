@@ -412,7 +412,12 @@ struct NativeTextView: NSViewRepresentable {
             let s = contentHeight - visibleHeight
             if s > 0 {
                 let h = visibleHeight
-                RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
+                // autoreleasepool: RunLoop.main.perform has no inner pool; AppKit
+                // layout calls inside updatePageStep can autorelease objects into
+                // the NSApplication pool if not captured here.
+                RunLoop.main.perform { [weak self] in
+                    autoreleasepool { self?.updatePageStep(scrollable: s, pageHeight: h) }
+                }
             }
             guard s > 0 else { return }
 
@@ -421,8 +426,10 @@ struct NativeTextView: NSViewRepresentable {
             guard abs(targetOffset - currentOffset) > 1 else { return }
 
             isScrollingProgrammatically = true
-            sv.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
-            sv.reflectScrolledClipView(sv.contentView)
+            autoreleasepool {
+                sv.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+                sv.reflectScrolledClipView(sv.contentView)
+            }
             isScrollingProgrammatically = false
         }
 
@@ -439,8 +446,10 @@ struct NativeTextView: NSViewRepresentable {
             guard docHeight > targetOffset else { return }
             let currentOffset = secondarySV.contentView.bounds.origin.y
             guard abs(targetOffset - currentOffset) > 1 else { return }
-            secondarySV.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
-            secondarySV.reflectScrolledClipView(secondarySV.contentView)
+            autoreleasepool {
+                secondarySV.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+                secondarySV.reflectScrolledClipView(secondarySV.contentView)
+            }
         }
 
         @objc func didLiveScroll(_ notification: Notification) {
@@ -462,13 +471,16 @@ struct NativeTextView: NSViewRepresentable {
             // We skip sizeToFit() on the secondary (avoids creating a full
             // NSLayoutManager layout that can crash during window teardown), so
             // the frame must be set explicitly to let NSScrollView scroll to
-            // targetOffset without clamping.
+            // targetOffset without clamping. Wrap in autoreleasepool: setFrameSize
+            // can trigger NSLayoutManager re-layout that autoreleases glyph objects.
             if let secondarySV = pageLayout?.secondaryScrollView,
                let secondaryTV = secondarySV.documentView as? NSTextView {
                 let needed = scrollable + pageHeight
                 if secondaryTV.frame.height < needed - 1 {
-                    secondaryTV.setFrameSize(NSSize(width: secondaryTV.frame.width,
-                                                    height: needed))
+                    autoreleasepool {
+                        secondaryTV.setFrameSize(NSSize(width: secondaryTV.frame.width,
+                                                        height: needed))
+                    }
                 }
             }
             let newStep = Double(pageHeight / scrollable)
@@ -487,7 +499,9 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let s = scrollable, h = visibleHeight
-            RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
+            RunLoop.main.perform { [weak self] in
+                autoreleasepool { self?.updatePageStep(scrollable: s, pageHeight: h) }
+            }
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { eventChannel?.tapCount += 1 }
