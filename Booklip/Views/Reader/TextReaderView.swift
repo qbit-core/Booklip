@@ -236,19 +236,15 @@ struct NativeTextView: NSViewRepresentable {
         }()
         if context.coordinator.lastStyleKey != styleKey
             || context.coordinator.lastContentKey != contentKey {
-            // Wrap in a local pool so that NSTextStorage / NSLayoutManager internal
-            // arrays (attribute runs, glyph tables) that AppKit autoreleases during
-            // setAttributedString / addAttributes / sizeToFit are drained HERE —
-            // while NSFont, NSColor, NSTextAttachment, etc. are still retained by
-            // the new text storage. Without this, those arrays linger in the main
-            // run-loop pool; when the window closes, NSTextStorage is freed first
-            // (releasing the objects), and the pool drain later tries to release them
-            // a second time → EXC_BAD_ACCESS in objc_release / NSArrayM.dealloc.
             autoreleasepool {
                 applyContent(to: textView)
-                // In double-page mode, force a synchronous layout so scrollToProgress
-                // below sees the correct content height for both columns.
-                if pageColumns > 1 { textView.sizeToFit() }
+                // Only the primary calls sizeToFit(). The primary's scrollable
+                // range is stored in PageStepState and used to set the secondary's
+                // frame height directly in updatePageStep — avoiding a full
+                // NSLayoutManager layout on the secondary, which creates large
+                // glyph/line-fragment arrays that AppKit may autorelease during
+                // window teardown (causing EXC_BAD_ACCESS in NSArrayM.dealloc).
+                if isPrimary && pageColumns > 1 { textView.sizeToFit() }
             }
             context.coordinator.lastStyleKey = styleKey
             context.coordinator.lastContentKey = contentKey
@@ -462,6 +458,19 @@ struct NativeTextView: NSViewRepresentable {
             guard isPrimary, pageColumns > 1, scrollable > 0 else { return }
             pageLayout?.scrollable = scrollable
             pageLayout?.pageHeight = pageHeight
+            // Expand the secondary's frame to match the primary's document height.
+            // We skip sizeToFit() on the secondary (avoids creating a full
+            // NSLayoutManager layout that can crash during window teardown), so
+            // the frame must be set explicitly to let NSScrollView scroll to
+            // targetOffset without clamping.
+            if let secondarySV = pageLayout?.secondaryScrollView,
+               let secondaryTV = secondarySV.documentView as? NSTextView {
+                let needed = scrollable + pageHeight
+                if secondaryTV.frame.height < needed - 1 {
+                    secondaryTV.setFrameSize(NSSize(width: secondaryTV.frame.width,
+                                                    height: needed))
+                }
+            }
             let newStep = Double(pageHeight / scrollable)
             if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
                 pageLayout?.value = newStep
