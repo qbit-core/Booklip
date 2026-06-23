@@ -147,38 +147,30 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             if let contentView = window?.contentView {
                 clearNSTextViews(in: contentView)
             }
-            // The NSApplication inner autorelease pool (created per run-loop iteration
-            // inside NSApplication.run) drains AFTER this event handler returns but
-            // BEFORE the next run-loop iteration. NSLayoutManager stores its glyph and
-            // line-fragment arrays and also autoreleases references to them via internal
-            // accessor methods; if we nil `window` here those arrays are freed by
-            // dealloc while the pool still holds a reference, so the pool drain calls
-            // objc_release on freed memory → EXC_BAD_ACCESS in NSArrayM.dealloc.
-            // By holding the window alive via `deferred` until the GCD block fires
-            // (next run-loop iteration, after the pool has already drained), all
-            // autoreleased references are released while the objects are still alive.
+            // Extend the window's lifetime past the current NSApplication inner pool
+            // drain. NSLayoutManager autoreleases references to its glyph arrays via
+            // internal accessor methods; if we nil `window` here, dealloc frees those
+            // arrays while the pool still holds references → EXC_BAD_ACCESS on drain.
+            // The GCD main queue is serviced at kCFRunLoopAfterWaiting (next iteration),
+            // AFTER the pool drain at kCFRunLoopBeforeWaiting, so the destroy helper's
+            // single release of `deferred` fires only after all pool references are gone.
+            //
+            // Critical: use an explicit capture-list [deferred] with an EMPTY body.
+            // Writing "_ = deferred" gives ARC an in-body use-point and the optimizer
+            // moves the release there, causing a double-free in block_destroy_helper.
+            // With no body reference, the sole release stays in the destroy helper.
             let deferred = window
             window = nil
             currentItemId = nil
             onClose?()
             onClose = nil
-            DispatchQueue.main.async { _ = deferred }
+            DispatchQueue.main.async { [deferred] in }
         }
 
         private func clearNSTextViews(in view: NSView) {
             for sub in view.subviews { clearNSTextViews(in: sub) }
             if let tv = view as? NSTextView {
                 autoreleasepool {
-                    // Invalidate NSLayoutManager's glyph and layout caches before
-                    // clearing the text storage. This releases the cached arrays now
-                    // (while our pool is active and objects are still alive) instead
-                    // of deferring to dealloc, where they could race the pool drain.
-                    if let lm = tv.layoutManager, let ts = tv.textStorage, ts.length > 0 {
-                        lm.invalidateGlyphs(forCharacterRange: NSRange(location: 0, length: ts.length),
-                                            changeInLength: 0, actualCharacterRange: nil)
-                        lm.invalidateLayout(forCharacterRange: NSRange(location: 0, length: ts.length),
-                                            actualCharacterRange: nil)
-                    }
                     tv.textStorage?.setAttributedString(NSAttributedString(string: ""))
                 }
             }
