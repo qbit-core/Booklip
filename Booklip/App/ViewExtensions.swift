@@ -144,10 +144,29 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
 
         func windowWillClose(_ notification: Notification) {
             if let id = currentItemId { _openReaderItemIDs.remove(id) }
+            // Clear every NSTextView in the window before releasing the hierarchy.
+            // NSTextStorage autoreleases its internal attribute-run arrays during
+            // dealloc; if those arrays outlive the objects they reference (fonts,
+            // images, attachments) in the main run-loop pool, objc_release fires on
+            // a freed pointer → EXC_BAD_ACCESS in NSArrayM.dealloc.
+            // Replacing content with an empty string here empties the attribute arrays
+            // while NSTextStorage is still live, so its dealloc becomes trivial.
+            if let contentView = window?.contentView {
+                clearNSTextViews(in: contentView)
+            }
             window = nil
             currentItemId = nil
             onClose?()
             onClose = nil
+        }
+
+        private func clearNSTextViews(in view: NSView) {
+            autoreleasepool {
+                for sub in view.subviews { clearNSTextViews(in: sub) }
+                if let tv = view as? NSTextView {
+                    tv.textStorage?.setAttributedString(NSAttributedString(string: ""))
+                }
+            }
         }
     }
 }

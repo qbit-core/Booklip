@@ -110,6 +110,14 @@ final class PageStepState: ObservableObject {
     // Primary's scrollable pixel range; set before value so it is readable in the
     // re-render that value triggers. Not @Published — no extra re-render needed.
     var scrollable: CGFloat = 0
+#if os(macOS)
+    // Direct reference to the secondary column's scroll view. The primary
+    // coordinator writes to this instead of relying on SwiftUI re-render timing
+    // (which is unreliable when the window is first sized and content is laid out).
+    weak var secondaryScrollView: NSScrollView?
+    // Visible height of the primary scroll view; set alongside scrollable.
+    var pageHeight: CGFloat = 0
+#endif
 }
 
 #if os(macOS)
@@ -168,6 +176,11 @@ struct NativeTextView: NSViewRepresentable {
         recognizer.numberOfClicksRequired = 1
         textView.addGestureRecognizer(recognizer)
         context.coordinator.scrollView = scrollView
+        if !isPrimary && pageColumns > 1 {
+            // Let the primary coordinator position us directly (pixel-accurate,
+            // no SwiftUI re-render timing dependency).
+            pageLayout?.secondaryScrollView = scrollView
+        }
         if isPrimary {
             // didLiveScrollNotification fires only on user-initiated gestures — never
             // from programmatic scrolls inside updateNSView, so writing bindings is safe.
@@ -202,6 +215,9 @@ struct NativeTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let textView = scrollView.documentView as! NSTextView
+        // Keep coordinator channel references current (makeCoordinator runs only once;
+        // the struct property may have changed identity across re-renders).
+        context.coordinator.pageLayout = pageLayout
 
         // Only rebuild content when text/style/highlights actually change — never on
         // the frequent progress updates that scrolling produces.  Rebuilding the full
@@ -360,6 +376,9 @@ struct NativeTextView: NSViewRepresentable {
             sv.contentView.scroll(to: NSPoint(x: 0, y: target))
             sv.reflectScrolledClipView(sv.contentView)
             isScrollingProgrammatically = false
+            // Position secondary synchronously so both columns advance together.
+            pageLayout?.pageHeight = pageHeight
+            positionSecondary()
             let capturedScrollable = scrollable
             let capturedPageHeight = pageHeight
             DispatchQueue.main.async { [weak self] in
@@ -387,28 +406,21 @@ struct NativeTextView: NSViewRepresentable {
         }
 
         func scrollToProgress(_ target: Double) {
+            // Secondary position is driven directly by positionSecondary() on the
+            // primary coordinator — pixel-accurate, no fraction math, no timing race.
+            guard isPrimary else { return }
             guard let sv = scrollView else { return }
 
-            // Secondary column: use the primary's pre-computed scrollable range so
-            // the right page is shown even before the secondary's own NSTextView has
-            // finished its asynchronous layout (at which point bounds.height may
-            // still be 0, making a content-height calculation useless).
-            let scrollable: CGFloat
-            if !isPrimary, let layout = pageLayout, layout.scrollable > 0 {
-                scrollable = layout.scrollable
-            } else {
-                let contentHeight = sv.documentView?.frame.height ?? 0
-                let visibleHeight = sv.contentView.bounds.height
-                let s = contentHeight - visibleHeight
-                if s > 0 {
-                    let h = visibleHeight
-                    RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
-                }
-                guard s > 0 else { return }
-                scrollable = s
+            let contentHeight = sv.documentView?.frame.height ?? 0
+            let visibleHeight = sv.contentView.bounds.height
+            let s = contentHeight - visibleHeight
+            if s > 0 {
+                let h = visibleHeight
+                RunLoop.main.perform { [weak self] in self?.updatePageStep(scrollable: s, pageHeight: h) }
             }
+            guard s > 0 else { return }
 
-            let targetOffset = target * scrollable
+            let targetOffset = target * s
             let currentOffset = sv.contentView.bounds.origin.y
             guard abs(targetOffset - currentOffset) > 1 else { return }
 
@@ -416,6 +428,23 @@ struct NativeTextView: NSViewRepresentable {
             sv.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
             sv.reflectScrolledClipView(sv.contentView)
             isScrollingProgrammatically = false
+        }
+
+        // Set the secondary column's scroll position to exactly one page (pageHeight
+        // pixels) past the primary. Called whenever the primary's position changes.
+        private func positionSecondary() {
+            guard isPrimary, pageColumns > 1 else { return }
+            guard let layout = pageLayout, layout.pageHeight > 0 else { return }
+            guard let secondarySV = layout.secondaryScrollView else { return }
+            guard let primarySV = scrollView else { return }
+            let primaryOffset = primarySV.contentView.bounds.origin.y
+            let targetOffset = primaryOffset + layout.pageHeight
+            let docHeight = secondarySV.documentView?.frame.height ?? 0
+            guard docHeight > targetOffset else { return }
+            let currentOffset = secondarySV.contentView.bounds.origin.y
+            guard abs(targetOffset - currentOffset) > 1 else { return }
+            secondarySV.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+            secondarySV.reflectScrolledClipView(secondarySV.contentView)
         }
 
         @objc func didLiveScroll(_ notification: Notification) {
@@ -431,13 +460,14 @@ struct NativeTextView: NSViewRepresentable {
 
         private func updatePageStep(scrollable: CGFloat, pageHeight: CGFloat) {
             guard isPrimary, pageColumns > 1, scrollable > 0 else { return }
-            // Store scrollable before publishing value so the secondary column can
-            // read it in the SwiftUI re-render that value triggers.
             pageLayout?.scrollable = scrollable
+            pageLayout?.pageHeight = pageHeight
             let newStep = Double(pageHeight / scrollable)
             if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
                 pageLayout?.value = newStep
             }
+            // Position the secondary column now that we know the page height.
+            positionSecondary()
         }
 
         @objc func clipViewFrameChanged(_ notification: Notification) {
