@@ -138,8 +138,14 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         func closeWindow() {
             window?.delegate = nil   // stop the delegate callback firing for our own close
             window?.close()
+            if let contentView = window?.contentView {
+                clearNSTextViews(in: contentView)
+            }
+            let deferred = window
             window = nil
             if let id = currentItemId { _openReaderItemIDs.remove(id) }
+            currentItemId = nil
+            deferWindowRelease(deferred)
         }
 
         func windowWillClose(_ notification: Notification) {
@@ -147,24 +153,37 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             if let contentView = window?.contentView {
                 clearNSTextViews(in: contentView)
             }
-            // Extend the window's lifetime past the current NSApplication inner pool
-            // drain. NSLayoutManager autoreleases references to its glyph arrays via
-            // internal accessor methods; if we nil `window` here, dealloc frees those
-            // arrays while the pool still holds references → EXC_BAD_ACCESS on drain.
-            // The GCD main queue is serviced at kCFRunLoopAfterWaiting (next iteration),
-            // AFTER the pool drain at kCFRunLoopBeforeWaiting, so the destroy helper's
-            // single release of `deferred` fires only after all pool references are gone.
-            //
-            // Critical: use an explicit capture-list [deferred] with an EMPTY body.
-            // Writing "_ = deferred" gives ARC an in-body use-point and the optimizer
-            // moves the release there, causing a double-free in block_destroy_helper.
-            // With no body reference, the sole release stays in the destroy helper.
             let deferred = window
             window = nil
             currentItemId = nil
             onClose?()
             onClose = nil
-            DispatchQueue.main.async { [deferred] in }
+            deferWindowRelease(deferred)
+        }
+
+        // Defer NSWindow dealloc past the NSApplication autorelease pool drain.
+        //
+        // NSLayoutManager autoreleases references to its glyph/line-fragment arrays
+        // via internal accessor methods. If the window (and thus NSLayoutManager) is
+        // freed before the pool drains, NSLayoutManager.dealloc frees those objects
+        // while the pool still holds a reference → objc_release on freed memory
+        // (EXC_BAD_ACCESS in NSArrayM.dealloc / AutoreleasePoolPage::releaseUntil).
+        //
+        // Two GCD hops are required because CFRunLoop calls __CFRunLoopDoBlocks once
+        // more AFTER source0 (AppKit event processing) but BEFORE kCFRunLoopBeforeWaiting
+        // (pool drain). A single async fires in that same pass; the outer block fires
+        // there, schedules the inner block, and the inner block fires only in the NEXT
+        // __CFRunLoopDoBlocks sweep — which is after the pool drain. This holds for
+        // both the user-close path (windowWillClose, called from source0) and the
+        // programmatic path (closeWindow, called from a SwiftUI GCD update block).
+        //
+        // Empty closure body: "_ = deferred" gives ARC an in-body use-point and the
+        // optimizer moves the release there, then block_destroy_helper releases again
+        // → double-free. With no body reference the sole release is in the destroy helper.
+        private func deferWindowRelease(_ window: NSWindow?) {
+            DispatchQueue.main.async {
+                DispatchQueue.main.async { [window] in }
+            }
         }
 
         private func clearNSTextViews(in view: NSView) {
