@@ -182,7 +182,13 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         // → double-free. With no body reference the sole release is in the destroy helper.
         private func deferWindowRelease(_ window: NSWindow?) {
             DispatchQueue.main.async {
-                DispatchQueue.main.async { [window] in }
+                DispatchQueue.main.async {
+                    // withExtendedLifetime creates a formal use-point for `window`,
+                    // suppressing the "never used" compiler warning and preventing
+                    // the ARC optimizer from moving the release into the closure body
+                    // (which would cause a double-free in block_destroy_helper).
+                    withExtendedLifetime(window) {}
+                }
             }
         }
 
