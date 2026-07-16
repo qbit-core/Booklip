@@ -31,6 +31,9 @@ class ReaderViewModel: ObservableObject {
     @Published var isLoading = true
     @Published var errorMessage: String?
     @Published var highlights: [BookHighlight] = []  // feature 9: local highlight list
+    // Incremented each time text content is replaced — lets NativeTextView skip O(n)
+    // string comparison and avoid forcing layout immediately after a new load.
+    private(set) var contentVersion: Int = 0
 
     let book: Book
     private var loadTask: Task<Void, Never>?
@@ -66,6 +69,7 @@ class ReaderViewModel: ObservableObject {
                 }.value
                 plainText = text
                 attributedText = attr
+                contentVersion += 1
             }
         } catch {
             errorMessage = error.localizedDescription

@@ -16,6 +16,7 @@ struct TextReaderView: View {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
+            contentVersion: vm.contentVersion,
             settings: settings,
             progress: $vm.progress,
             onTap: { showBars.toggle() },
@@ -37,6 +38,7 @@ import AppKit
 struct NativeTextView: NSViewRepresentable {
     let text: String?
     let attributedText: AttributedString?
+    let contentVersion: Int
     let settings: ReadingSettings
     @Binding var progress: Double
     let onTap: () -> Void
@@ -81,8 +83,13 @@ struct NativeTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let textView = scrollView.documentView as! NSTextView
         context.coordinator.displayMode = displayMode
-        applyContent(to: textView)
+
+        let contentChanged = contentVersion != context.coordinator.appliedContentVersion
+        applyContent(to: textView, contentChanged: contentChanged)
         applyHighlights(to: textView)
+        if contentChanged {
+            context.coordinator.appliedContentVersion = contentVersion
+        }
 
         // feature 1 & 2: handle page navigation
         let dir = pageNavigationDirection
@@ -91,8 +98,12 @@ struct NativeTextView: NSViewRepresentable {
             DispatchQueue.main.async { self.pageNavigationDirection = 0 }
         }
 
-        // Scroll to saved progress (skip if we just navigated)
-        context.coordinator.scrollToProgress(progress)
+        // Skip scrollToProgress immediately after setting new content — NSLayoutManager
+        // hasn't finished laying out the new text yet, so frame.height forces a full
+        // glyph-generation pass that floods the autorelease pool with dangling refs.
+        if !contentChanged {
+            context.coordinator.scrollToProgress(progress)
+        }
 
         // feature 10: scroll to first search match
         if !searchQuery.isEmpty {
@@ -100,8 +111,10 @@ struct NativeTextView: NSViewRepresentable {
         }
     }
 
-    // Apply font/color/spacing and text content
-    private func applyContent(to textView: NSTextView) {
+    // Apply font/color/spacing and text content.
+    // contentChanged=true means we must replace the string; false means only re-style.
+    private func applyContent(to textView: NSTextView, contentChanged: Bool) {
+        guard let storage = textView.textStorage else { return }
         let font = NSFont(name: settings.fontName, size: settings.fontSize)
             ?? NSFont.systemFont(ofSize: settings.fontSize)
         let color = NSColor(settings.currentPreset.text)
@@ -111,24 +124,37 @@ struct NativeTextView: NSViewRepresentable {
             .font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle
         ]
 
-        if let attr = attributedText {
-            let str = NSAttributedString(attr).string
-            if textView.string != str {
-                textView.textStorage?.setAttributedString(NSAttributedString(attr))
+        // Batch all mutations so NSLayoutManager receives a single processEditing call.
+        storage.beginEditing()
+
+        if contentChanged {
+            if let attr = attributedText {
+                // Markdown: replace with attributed content
+                let nsAttr = NSAttributedString(attr)
+                storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
+                                          with: nsAttr)
+            } else if let str = text {
+                // Plain / EPUB text: replaceCharacters copies into NSTextStorage's own
+                // buffer, breaking Swift COW buffer sharing that caused the autorelease
+                // pool crash when the Swift String was freed while NSLayoutManager still
+                // held an interior pointer via the bridged NSString.
+                storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
+                                          with: str)
             }
-        } else if let str = text, textView.string != str {
-            textView.textStorage?.setAttributedString(NSAttributedString(string: str))
         }
 
-        if let storage = textView.textStorage, storage.length > 0 {
-            storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
+        if storage.length > 0 {
+            storage.setAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
+
+        storage.endEditing()
     }
 
     // feature 5 & 9: apply user highlights (yellow) and TTS sentence highlight (blue)
     private func applyHighlights(to textView: NSTextView) {
         guard let storage = textView.textStorage, storage.length > 0 else { return }
+        storage.beginEditing()
         let full = NSRange(location: 0, length: storage.length)
         storage.removeAttribute(.backgroundColor, range: full)
 
@@ -147,6 +173,7 @@ struct NativeTextView: NSViewRepresentable {
                                      range: NSRange(location: loc, length: len))
             }
         }
+        storage.endEditing()
     }
 
     class Coordinator: NSObject, NSTextViewDelegate {
@@ -159,6 +186,9 @@ struct NativeTextView: NSViewRepresentable {
         weak var textView: NSTextView?
         var isScrollingProgrammatically = false
         private var lastSearchQuery = ""
+        // Tracks which contentVersion has been written into NSTextStorage so we avoid
+        // O(n) string comparison and skip scrollToProgress until layout is ready.
+        var appliedContentVersion: Int = -1
 
         init(progress: Binding<Double>, onTap: @escaping () -> Void,
              navigationDirection: Binding<Int>, selectedRange: Binding<NSRange?>) {
