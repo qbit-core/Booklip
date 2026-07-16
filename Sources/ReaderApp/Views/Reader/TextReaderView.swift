@@ -95,40 +95,47 @@ struct NativeTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        let textView = scrollView.documentView as! NSTextView
+        guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.displayMode = displayMode
 
         let contentChanged = contentVersion != context.coordinator.appliedContentVersion
-        applyContent(to: textView, contentChanged: contentChanged)
-        applyHighlights(to: textView)
         if contentChanged {
             context.coordinator.appliedContentVersion = contentVersion
         }
 
-        // Defer all layout-forcing operations out of the SwiftUI update cycle.
-        // updateNSView is called during SwiftUI's own layout pass; accessing
-        // frame.height or calling scroll(to:) synchronously here triggers AppKit's
-        // -layoutSubtreeIfNeeded inside an already-in-progress layout, which corrupts
-        // NSView retain counts and causes the "reached dealloc with superview" crash.
+        // ALL AppKit mutations deferred to the next run loop iteration.
+        //
+        // SwiftUI calls updateNSView from within its own layout/render pass, which
+        // sits inside an AppKit layout callout. Any NSTextStorage mutation that
+        // fires processEditing → NSLayoutManager (applyContent, applyHighlights),
+        // or any call that accesses documentView.frame.height (scrollToProgress,
+        // navigatePage), triggers -layoutSubtreeIfNeeded on a view already being
+        // laid out. That layout recursion corrupts NSView retain counts, which then
+        // surfaces as EXC_BAD_ACCESS or the "reached dealloc with superview" crash.
+        //
+        // scrollView/textView captured WEAKLY so the block is a no-op if the window
+        // closes before this fires (prevents accessing deallocated views).
         let coordinator = context.coordinator
-        let targetProgress = progress
-        let dir = pageNavigationDirection
-        let query = searchQuery
+        let snapshot = self          // value-type copy; @Binding setters stay live
         let skipScroll = contentChanged
-        DispatchQueue.main.async { [weak coordinator] in
-            guard let coordinator else { return }
-            // feature 1 & 2: handle page navigation
-            if dir != 0 {
-                coordinator.navigatePage(direction: dir, in: scrollView)
-                DispatchQueue.main.async { self.pageNavigationDirection = 0 }
+        DispatchQueue.main.async { [weak coordinator, weak scrollView, weak textView] in
+            guard let coordinator, let scrollView, let textView else { return }
+
+            snapshot.applyContent(to: textView, contentChanged: contentChanged)
+            snapshot.applyHighlights(to: textView)
+
+            // feature 1 & 2: page navigation
+            if snapshot.pageNavigationDirection != 0 {
+                coordinator.navigatePage(direction: snapshot.pageNavigationDirection, in: scrollView)
+                DispatchQueue.main.async { snapshot.pageNavigationDirection = 0 }
             }
-            // Skip scroll restore on the pass where content was just set.
+            // Skip scroll restore on the pass where content was just replaced.
             if !skipScroll {
-                coordinator.scrollToProgress(targetProgress)
+                coordinator.scrollToProgress(snapshot.progress)
             }
             // feature 10: scroll to first search match
-            if !query.isEmpty {
-                coordinator.scrollToSearch(query: query, in: scrollView, textView: textView)
+            if !snapshot.searchQuery.isEmpty {
+                coordinator.scrollToSearch(query: snapshot.searchQuery, in: scrollView, textView: textView)
             }
         }
     }
