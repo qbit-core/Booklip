@@ -121,8 +121,25 @@ struct NativeTextView: NSViewRepresentable {
         DispatchQueue.main.async { [weak coordinator, weak scrollView, weak textView] in
             guard let coordinator, let scrollView, let textView else { return }
 
-            snapshot.applyContent(to: textView, contentChanged: contentChanged)
-            snapshot.applyHighlights(to: textView)
+            // autoreleasepool is REQUIRED here.
+            //
+            // replaceCharacters(in:with: swiftString) bridges the Swift String to an
+            // __NSCFString that wraps — not copies — Swift's COW buffer. That NSString
+            // is autoreleased into the per-callout pool. When the closure exits, ARC
+            // releases `snapshot`, dropping snapshot.text's retain on the buffer. If
+            // vm.plainText was already freed (window closed), the buffer reaches
+            // refcount 0 here. The per-callout pool then drains and tries to release
+            // the __NSCFString → reads freed memory → EXC_BAD_ACCESS.
+            //
+            // The inner autoreleasepool drains the bridged NSString while `snapshot`
+            // (and thus the buffer) is still alive. After the pool drains, the buffer
+            // refcount is still ≥1 (snapshot.text holds it). The closure then exits,
+            // snapshot is released, and the buffer is freed cleanly — with nothing
+            // left in the outer pool that references it.
+            autoreleasepool {
+                snapshot.applyContent(to: textView, contentChanged: contentChanged)
+                snapshot.applyHighlights(to: textView)
+            }
 
             // feature 1 & 2: page navigation
             if snapshot.pageNavigationDirection != 0 {
