@@ -105,23 +105,31 @@ struct NativeTextView: NSViewRepresentable {
             context.coordinator.appliedContentVersion = contentVersion
         }
 
-        // feature 1 & 2: handle page navigation
+        // Defer all layout-forcing operations out of the SwiftUI update cycle.
+        // updateNSView is called during SwiftUI's own layout pass; accessing
+        // frame.height or calling scroll(to:) synchronously here triggers AppKit's
+        // -layoutSubtreeIfNeeded inside an already-in-progress layout, which corrupts
+        // NSView retain counts and causes the "reached dealloc with superview" crash.
+        let coordinator = context.coordinator
+        let targetProgress = progress
         let dir = pageNavigationDirection
-        if dir != 0 {
-            context.coordinator.navigatePage(direction: dir, in: scrollView)
-            DispatchQueue.main.async { self.pageNavigationDirection = 0 }
-        }
-
-        // Skip scrollToProgress immediately after setting new content — NSLayoutManager
-        // hasn't finished laying out the new text yet, so frame.height forces a full
-        // glyph-generation pass that floods the autorelease pool with dangling refs.
-        if !contentChanged {
-            context.coordinator.scrollToProgress(progress)
-        }
-
-        // feature 10: scroll to first search match
-        if !searchQuery.isEmpty {
-            context.coordinator.scrollToSearch(query: searchQuery, in: scrollView, textView: textView)
+        let query = searchQuery
+        let skipScroll = contentChanged
+        DispatchQueue.main.async { [weak coordinator] in
+            guard let coordinator else { return }
+            // feature 1 & 2: handle page navigation
+            if dir != 0 {
+                coordinator.navigatePage(direction: dir, in: scrollView)
+                DispatchQueue.main.async { self.pageNavigationDirection = 0 }
+            }
+            // Skip scroll restore on the pass where content was just set.
+            if !skipScroll {
+                coordinator.scrollToProgress(targetProgress)
+            }
+            // feature 10: scroll to first search match
+            if !query.isEmpty {
+                coordinator.scrollToSearch(query: query, in: scrollView, textView: textView)
+            }
         }
     }
 
