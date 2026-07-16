@@ -55,6 +55,20 @@ struct NativeTextView: NSViewRepresentable {
                     selectedRange: $selectedRange)
     }
 
+    // Clear text content and remove the bounds observer before SwiftUI releases
+    // the view hierarchy. NSLayoutManager with a large glyph store (≥1M chars)
+    // walks NSTextContainer→NSTextView back-pointers during dealloc, producing
+    // an extra retain/release that corrupts the NSView refcount and triggers the
+    // "reached dealloc but still has a super view" assertion.
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator)
+        guard let textView = scrollView.documentView as? NSTextView,
+              let storage = textView.textStorage else { return }
+        storage.beginEditing()
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: "")
+        storage.endEditing()
+    }
+
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
         let textView = scrollView.documentView as! NSTextView
