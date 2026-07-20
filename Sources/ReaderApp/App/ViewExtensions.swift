@@ -61,29 +61,12 @@ private var _openReaderItemIDs: Set<AnyHashable> = []
 // autorelease pool drain. See deferWindowRelease(_:) for the full rationale.
 private var _retainedWindows: [ObjectIdentifier: NSWindow] = [:]
 
-// Disconnect NSLayoutManager from its NSTextStorage while both objects are
-// still alive, so NSLayoutManager.dealloc runs in a safe context.
-//
-// The AppKit bug in NSLayoutManager.dealloc: when it fires as part of the
-// NSWindow dealloc chain (NSWindow → NSHostingController → NSTextView →
-// NSTextStorage → NSLayoutManager), some sibling object freed earlier in the
-// same chain is accessed by NSLayoutManager's internal glyph-cache teardown,
-// producing a retain on a freed pointer that crashes the pool drain.
-//
-// Calling storage.removeLayoutManager(lm) HERE (while the window is still
-// alive and retained by _retainedWindows) triggers NSLayoutManager.dealloc
-// in an ISOLATED context: NSTextStorage, fonts, and all glyph-referenced
-// objects are still live, so the autoreleased glyph-cache objects drain
-// cleanly.  When deferWindowRelease later releases the window, the layout
-// manager is already gone and dismantleNSView returns early.
-private func disconnectNSLayoutManagers(in view: NSView) {
-    for sub in view.subviews { disconnectNSLayoutManagers(in: sub) }
-    if let tv = view as? NSTextView,
-       let storage = tv.textStorage,
-       let lm = tv.layoutManager {
-        autoreleasepool {
-            storage.removeLayoutManager(lm)
-        }
+// Collect all NSTextStorage objects in a view tree.
+// Used by deferWindowRelease to keep them alive through the window dealloc chain.
+private func collectTextStorages(in view: NSView, into arr: inout [NSTextStorage]) {
+    for sub in view.subviews { collectTextStorages(in: sub, into: &arr) }
+    if let tv = view as? NSTextView, let storage = tv.textStorage {
+        arr.append(storage)
     }
 }
 
@@ -168,14 +151,6 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         }
 
         func closeWindow() {
-            // Dispatch NSTextView wipe BEFORE window.close() so the wipe block is
-            // queued ahead of the binding-nil block (dispatched inside windowWillClose
-            // via onClose()).  GCD FIFO guarantees the wipe fires while the NSScrollView
-            // is still in the subview tree, emptying NSLayoutManager's glyph cache
-            // before deferWindowRelease releases the window.
-            if let cv = window?.contentViewController?.view {
-                DispatchQueue.main.async { disconnectNSLayoutManagers(in: cv) }
-            }
             window?.delegate = nil
             window?.close()
             let deferred = window
@@ -190,33 +165,40 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             let deferred = window
             window = nil
             currentItemId = nil
-            // Dispatch wipe BEFORE onClose() so it is queued ahead of binding-nil.
-            if let cv = deferred?.contentViewController?.view {
-                DispatchQueue.main.async { disconnectNSLayoutManagers(in: cv) }
-            }
             onClose?()
             onClose = nil
             deferWindowRelease(deferred)
         }
 
-        // NSLayoutManager.dealloc has an AppKit bug: it calls retain on an already-
-        // freed glyph-cache object in the same dealloc chain, and the autoreleasepool
-        // that wraps removeValue(forKey:) crashes when it drains that bad reference.
-        // Fix: clear NSTextView content while the view is still in the subview tree
-        // (dispatched by closeWindow/windowWillClose BEFORE the binding-nil block so
-        // GCD FIFO guarantees the wipe fires first).  With an empty glyph cache,
-        // NSLayoutManager.dealloc has nothing to over-retain/over-release.
+        // AppKit bug: NSTextView.dealloc releases both NSLayoutManager and NSTextStorage,
+        // but their release order is undefined. If NSTextStorage is freed first,
+        // NSLayoutManager.dealloc (or the glyph-cache objects it autoreleases into the
+        // explicit pool) accesses freed NSTextStorage memory when the pool drains →
+        // EXC_BAD_ACCESS in objc_release.
+        //
+        // Fix: capture strong references to all NSTextStorage objects before releasing
+        // the window. This keeps NSTextStorage alive through the entire window-dealloc
+        // chain and the subsequent ARP drain, regardless of ivar-release order inside
+        // NSTextView.dealloc. After the pool drains safely, we release NSTextStorage
+        // in a dedicated pool where no sibling objects are being freed.
         //
         // _retainedWindows keeps NSWindow alive across two main-queue hops to outlast
-        // the NSApplication autorelease pool drain.  Closures capture only `key`
-        // (ObjectIdentifier, a value type) — no ARC on NSWindow through the closure.
+        // the NSApplication per-callout autorelease pool drain. Closures capture only
+        // `key` (ObjectIdentifier, a value type) — no ARC on NSWindow through the closure.
         private func deferWindowRelease(_ window: NSWindow?) {
             guard let window else { return }
             let key = ObjectIdentifier(window)
             _retainedWindows[key] = window
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                var textStorages: [NSTextStorage] = []
+                if let cv = window.contentViewController?.view {
+                    collectTextStorages(in: cv, into: &textStorages)
+                }
                 autoreleasepool {
                     _ = _retainedWindows.removeValue(forKey: key)
+                }
+                autoreleasepool {
+                    textStorages.removeAll()
                 }
             }
         }
