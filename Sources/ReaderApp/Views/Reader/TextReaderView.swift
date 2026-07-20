@@ -62,11 +62,17 @@ struct NativeTextView: NSViewRepresentable {
     // "reached dealloc but still has a super view" assertion.
     static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator)
+        // Set BEFORE any AppKit mutation so any still-queued async blocks bail early.
+        coordinator.isDismantled = true
         guard let textView = scrollView.documentView as? NSTextView,
               let storage = textView.textStorage else { return }
-        storage.beginEditing()
-        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: "")
-        storage.endEditing()
+        // Drain bridged NSStrings inside their own pool so they don't survive
+        // into the per-callout ARP that wraps the close event.
+        autoreleasepool {
+            storage.beginEditing()
+            storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: "")
+            storage.endEditing()
+        }
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -119,7 +125,7 @@ struct NativeTextView: NSViewRepresentable {
         let snapshot = self          // value-type copy; @Binding setters stay live
         let skipScroll = contentChanged
         DispatchQueue.main.async { [weak coordinator, weak scrollView, weak textView] in
-            guard let coordinator, let scrollView, let textView else { return }
+            guard let coordinator, !coordinator.isDismantled, let scrollView, let textView else { return }
 
             // autoreleasepool is REQUIRED here.
             //
@@ -230,6 +236,7 @@ struct NativeTextView: NSViewRepresentable {
         var displayMode: ReaderDisplayMode = .scroll
         weak var scrollView: NSScrollView?
         weak var textView: NSTextView?
+        var isDismantled = false
         var isScrollingProgrammatically = false
         private var lastSearchQuery = ""
         // Tracks which contentVersion has been written into NSTextStorage so we avoid
