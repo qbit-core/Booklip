@@ -93,15 +93,15 @@ private func teardownWindowContent(
 ) {
     let key = ObjectIdentifier(window)
     var textStorages = textStorages
-    var hostingVC = hostingVC
 
-    // Nil both references to the hosting controller in one explicit pool so that
-    // NSHostingController → NSTextView → NSLayoutManager all dealloc here, while
-    // textStorages keeps NSTextStorage alive through NSLayoutManager.dealloc's
-    // autorelease of glyph-cache objects.
+    // Nil contentViewController in an explicit pool. The hosting controller's
+    // retain count drops to zero here, triggering NSHostingController →
+    // NSTextView → NSLayoutManager dealloc while `hostingVC` (parameter, alive
+    // for the entire function) and `textStorages` keep NSTextStorage live through
+    // NSLayoutManager.dealloc's autorelease of glyph-cache objects.
     autoreleasepool {
         window.contentViewController = nil
-        hostingVC = nil
+        _ = hostingVC  // keep parameter alive through pool drain
     }
 
     // Release NSTextStorage now that NSLayoutManager is gone.
