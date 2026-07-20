@@ -65,14 +65,17 @@ struct NativeTextView: NSViewRepresentable {
         // Set BEFORE any AppKit mutation so any still-queued async blocks bail early.
         coordinator.isDismantled = true
         guard let textView = scrollView.documentView as? NSTextView,
-              let storage = textView.textStorage else { return }
-        // Drain bridged NSStrings inside their own pool so they don't survive
-        // into the per-callout ARP that wraps the close event.
-        autoreleasepool {
-            storage.beginEditing()
-            storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: "")
-            storage.endEditing()
-        }
+              let storage = textView.textStorage,
+              let layoutManager = textView.layoutManager else { return }
+        // NSLayoutManager is LAZY: clearing text via replaceCharacters only
+        // schedules a glyph-layout pass for the next display cycle. That deferred
+        // pass fires after NSTextStorage content is freed → dangling pointer →
+        // EXC_BAD_ACCESS in the run-loop's per-callout autorelease pool drain.
+        //
+        // Removing the layout manager from the text storage cancels all pending
+        // deferred layout work and severs the storage→layoutManager back-pointer
+        // chain that causes the over-release.
+        storage.removeLayoutManager(layoutManager)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
