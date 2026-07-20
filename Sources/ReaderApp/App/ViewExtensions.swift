@@ -62,11 +62,58 @@ private var _openReaderItemIDs: Set<AnyHashable> = []
 private var _retainedWindows: [ObjectIdentifier: NSWindow] = [:]
 
 // Collect all NSTextStorage objects in a view tree.
-// Used by deferWindowRelease to keep them alive through the window dealloc chain.
 private func collectTextStorages(in view: NSView, into arr: inout [NSTextStorage]) {
     for sub in view.subviews { collectTextStorages(in: sub, into: &arr) }
     if let tv = view as? NSTextView, let storage = tv.textStorage {
         arr.append(storage)
+    }
+}
+
+// Tear down an NSWindow's view hierarchy safely after close() has fully returned.
+//
+// AppKit bug: during NSWindow.close(), objects autoreleased by AppKit's own close
+// machinery (window ordering, CA transactions, animation bookkeeping) sit in the
+// CFRunLoop per-callout pool.  If we nil contentViewController synchronously inside
+// windowWillClose — which fires mid-close() — those already-autoreleased AppKit
+// objects can hold unsafe_unretained back-refs into the view hierarchy we just freed.
+// When the outer CFRunLoop pool drains at __CFRunLoopPerCalloutARPEnd, those refs
+// release already-freed memory → EXC_BAD_ACCESS.
+//
+// Solution: never call this from within the close() call stack (i.e. windowWillClose).
+// The closeWindow() path is safe because it nils the delegate before calling close(),
+// so windowWillClose never fires, and this runs after close() returns.
+// The windowWillClose path defers to DispatchQueue.main.async so close() unwinds first.
+private func performWindowTeardown(_ window: NSWindow?) {
+    guard let window else { return }
+    let key = ObjectIdentifier(window)
+
+    // Step 1: collect NSTextStorage refs while the view hierarchy is intact.
+    var textStorages: [NSTextStorage] = []
+    if let cv = window.contentViewController?.view {
+        collectTextStorages(in: cv, into: &textStorages)
+    }
+
+    // Step 2: tear down the entire view hierarchy in an explicit pool.
+    // NSLayoutManager.dealloc autoreleases glyph-cache objects; they drain here
+    // while NSTextStorage (held by textStorages) and every font/attribute object
+    // (kept alive by the local `window` strong ref) are still live.
+    autoreleasepool {
+        window.contentViewController = nil
+    }
+
+    // Step 3: release NSTextStorage now that NSLayoutManager is gone.
+    autoreleasepool {
+        textStorages.removeAll()
+    }
+
+    // Step 4: keep the now-empty NSWindow alive one more main-queue hop to outlast
+    // the NSApplication per-callout ARP drain, then release it trivially.
+    // The asyncAfter closure captures only `key` (value type — no ARC on NSWindow).
+    _retainedWindows[key] = window
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        autoreleasepool {
+            _ = _retainedWindows.removeValue(forKey: key)
+        }
     }
 }
 
@@ -167,51 +214,19 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             currentItemId = nil
             onClose?()
             onClose = nil
-            deferWindowRelease(deferred)
+            // Must NOT call performWindowTeardown synchronously here — windowWillClose
+            // fires mid-close(), so AppKit's close() machinery still has autoreleased
+            // objects in the CFRunLoop per-callout pool that reference the view hierarchy.
+            // Defer to after close() fully unwinds. `deferred` is captured by value (strong
+            // ref to NSWindow); no reference to self/Coordinator needed.
+            DispatchQueue.main.async { performWindowTeardown(deferred) }
         }
 
-        // AppKit bug: during NSWindow teardown, objects freed earlier in the dealloc
-        // chain (fonts, text attributes, glyph buffers) are referenced by autoreleased
-        // objects that NSLayoutManager.dealloc puts into the pool.  When the pool drains
-        // those objects release already-freed siblings → EXC_BAD_ACCESS in objc_release.
-        //
-        // Fix (four steps, all synchronous except the final empty-window release):
-        //   1. While the view hierarchy is intact, hold NSTextStorage externally.
-        //   2. Nil out contentViewController inside an explicit pool — this triggers the
-        //      full NSHostingController → NSTextView → NSLayoutManager teardown while
-        //      every referenced object (NSTextStorage, fonts, attributes) is still live
-        //      via the `window` local strong ref and `textStorages`.  The pool drains
-        //      cleanly.
-        //   3. Release NSTextStorage in its own pool (NSLayoutManager is already gone).
-        //   4. Keep the now-empty NSWindow alive one more main-queue hop (to outlast any
-        //      NSApplication per-callout ARP drain), then release it trivially.
         private func deferWindowRelease(_ window: NSWindow?) {
-            guard let window else { return }
-            let key = ObjectIdentifier(window)
-
-            // Step 1
-            var textStorages: [NSTextStorage] = []
-            if let cv = window.contentViewController?.view {
-                collectTextStorages(in: cv, into: &textStorages)
-            }
-
-            // Step 2
-            autoreleasepool {
-                window.contentViewController = nil
-            }
-
-            // Step 3
-            autoreleasepool {
-                textStorages.removeAll()
-            }
-
-            // Step 4 — asyncAfter captures only `key` (value type, no ARC on NSWindow)
-            _retainedWindows[key] = window
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                autoreleasepool {
-                    _ = _retainedWindows.removeValue(forKey: key)
-                }
-            }
+            // Safe to call synchronously: only reached from closeWindow(), which nils
+            // the delegate before calling close(), so windowWillClose never fires and
+            // close() has already returned by the time we get here.
+            performWindowTeardown(window)
         }
     }
 }
