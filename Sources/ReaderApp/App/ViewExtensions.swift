@@ -189,16 +189,28 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             guard let window else { return }
             let key = ObjectIdentifier(window)
             _retainedWindows[key] = window
+            // Capture ONLY `key` (a value type — no ARC). Do NOT reference `window`
+            // inside the closure body; doing so would add a second strong owner and
+            // the window would dealloc outside our explicit pool when the closure
+            // itself is freed (block_destroy_helper → EXC_BAD_ACCESS).
+            // _retainedWindows[key] is the sole strong owner of the NSWindow.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 var textStorages: [NSTextStorage] = []
-                if let cv = window.contentViewController?.view {
+                if let cv = _retainedWindows[key]?.contentViewController?.view {
                     collectTextStorages(in: cv, into: &textStorages)
                 }
+                // `cv` is out of scope here. Only _retainedWindows[key] retains NSWindow.
                 autoreleasepool {
                     _ = _retainedWindows.removeValue(forKey: key)
+                    // NSWindow.dealloc fires inside this pool (sole retainer released).
+                    // NSTextView.dealloc releases NSLayoutManager → NSLayoutManager.dealloc
+                    // autoreleases glyph-cache objects into this pool.
+                    // NSTextStorage is kept alive by `textStorages` so those objects
+                    // drain safely regardless of ivar-release order in NSTextView.dealloc.
                 }
                 autoreleasepool {
                     textStorages.removeAll()
+                    // NSTextStorage.dealloc fires here, cleanly.
                 }
             }
         }
