@@ -61,30 +61,28 @@ private var _openReaderItemIDs: Set<AnyHashable> = []
 // autorelease pool drain. See deferWindowRelease(_:) for the full rationale.
 private var _retainedWindows: [ObjectIdentifier: NSWindow] = [:]
 
-// Clear NSTextView content recursively so NSLayoutManager's glyph cache is
-// empty before the enclosing NSWindow is released.  Must be called while the
-// view is still in the subview tree (before SwiftUI teardown removes it).
-private func wipeNSTextViews(in view: NSView) {
-    for sub in view.subviews { wipeNSTextViews(in: sub) }
+// Disconnect NSLayoutManager from its NSTextStorage while both objects are
+// still alive, so NSLayoutManager.dealloc runs in a safe context.
+//
+// The AppKit bug in NSLayoutManager.dealloc: when it fires as part of the
+// NSWindow dealloc chain (NSWindow → NSHostingController → NSTextView →
+// NSTextStorage → NSLayoutManager), some sibling object freed earlier in the
+// same chain is accessed by NSLayoutManager's internal glyph-cache teardown,
+// producing a retain on a freed pointer that crashes the pool drain.
+//
+// Calling storage.removeLayoutManager(lm) HERE (while the window is still
+// alive and retained by _retainedWindows) triggers NSLayoutManager.dealloc
+// in an ISOLATED context: NSTextStorage, fonts, and all glyph-referenced
+// objects are still live, so the autoreleased glyph-cache objects drain
+// cleanly.  When deferWindowRelease later releases the window, the layout
+// manager is already gone and dismantleNSView returns early.
+private func disconnectNSLayoutManagers(in view: NSView) {
+    for sub in view.subviews { disconnectNSLayoutManagers(in: sub) }
     if let tv = view as? NSTextView,
        let storage = tv.textStorage,
-       let lm = tv.layoutManager,
-       let tc = tv.textContainer {
+       let lm = tv.layoutManager {
         autoreleasepool {
-            storage.setAttributedString(NSAttributedString(string: ""))
-            // setAttributedString INVALIDATES NSLayoutManager's glyph cache for
-            // the replaced range but does NOT free the allocated glyph data —
-            // NSLayoutManager marks the range as needing regeneration and keeps
-            // the old glyph buffer live.  When NSLayoutManager.dealloc runs
-            // later it tries to retain an internal glyph-cache object that was
-            // already freed in the same dealloc chain (AppKit bug), crashing
-            // during the autorelease pool drain.
-            //
-            // ensureLayout(for:) forces NSLayoutManager to REGENERATE glyphs for
-            // the now-empty content.  During regeneration the invalid (large) glyph
-            // buffer is freed and replaced with a trivially empty one.  After this
-            // call NSLayoutManager.dealloc has nothing to over-retain/release.
-            lm.ensureLayout(for: tc)
+            storage.removeLayoutManager(lm)
         }
     }
 }
@@ -176,7 +174,7 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             // is still in the subview tree, emptying NSLayoutManager's glyph cache
             // before deferWindowRelease releases the window.
             if let cv = window?.contentViewController?.view {
-                DispatchQueue.main.async { wipeNSTextViews(in: cv) }
+                DispatchQueue.main.async { disconnectNSLayoutManagers(in: cv) }
             }
             window?.delegate = nil
             window?.close()
@@ -194,7 +192,7 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             currentItemId = nil
             // Dispatch wipe BEFORE onClose() so it is queued ahead of binding-nil.
             if let cv = deferred?.contentViewController?.view {
-                DispatchQueue.main.async { wipeNSTextViews(in: cv) }
+                DispatchQueue.main.async { disconnectNSLayoutManagers(in: cv) }
             }
             onClose?()
             onClose = nil
