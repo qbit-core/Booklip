@@ -183,23 +183,25 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         // in a dedicated pool where no sibling objects are being freed.
         //
         // _retainedWindows keeps NSWindow alive across two main-queue hops to outlast
-        // the NSApplication per-callout autorelease pool drain. Closures capture only
-        // `key` (ObjectIdentifier, a value type) — no ARC on NSWindow through the closure.
+        // the NSApplication per-callout autorelease pool drain.
         private func deferWindowRelease(_ window: NSWindow?) {
             guard let window else { return }
             let key = ObjectIdentifier(window)
+            // Collect NSTextStorage refs NOW, while the view hierarchy is intact.
+            // 50 ms later the window's contentViewController may be replaced by an
+            // internal AppKit object (e.g. _AdditionalDimmingViewContentViewController)
+            // that does not respond to -contentViewController → NSInvalidArgumentException.
+            var textStorages: [NSTextStorage] = []
+            if let cv = window.contentViewController?.view {
+                collectTextStorages(in: cv, into: &textStorages)
+            }
             _retainedWindows[key] = window
-            // Capture ONLY `key` (a value type — no ARC). Do NOT reference `window`
-            // inside the closure body; doing so would add a second strong owner and
-            // the window would dealloc outside our explicit pool when the closure
-            // itself is freed (block_destroy_helper → EXC_BAD_ACCESS).
-            // _retainedWindows[key] is the sole strong owner of the NSWindow.
+            // The asyncAfter closure captures only `key` (value type — no ARC) and
+            // `textStorages` (already populated). It does NOT capture `window`; a direct
+            // reference would add a second strong owner and NSWindow.dealloc would fire
+            // outside our explicit pool when the closure is freed by the dispatch source
+            // (block_destroy_helper → EXC_BAD_ACCESS).
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                var textStorages: [NSTextStorage] = []
-                if let cv = _retainedWindows[key]?.contentViewController?.view {
-                    collectTextStorages(in: cv, into: &textStorages)
-                }
-                // `cv` is out of scope here. Only _retainedWindows[key] retains NSWindow.
                 autoreleasepool {
                     _ = _retainedWindows.removeValue(forKey: key)
                     // NSWindow.dealloc fires inside this pool (sole retainer released).
