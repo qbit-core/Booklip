@@ -48,5 +48,9 @@ struct Book: Identifiable, Codable {
         BookStore.documentsDirectory.appendingPathComponent(fileName)
     }
 
+    var coverURL: URL? {
+        coverImageFileName.map { BookStore.documentsDirectory.appendingPathComponent($0) }
+    }
+
     var isFinished: Bool { progress >= 0.99 }
 }
