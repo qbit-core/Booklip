@@ -23,13 +23,40 @@ enum BookFormat: String, Codable, CaseIterable {
     }
 }
 
-// Stored text highlight (feature 9)
-struct BookHighlight: Identifiable, Codable, Equatable {
-    var id: UUID = UUID()
-    var startOffset: Int
-    var length: Int
-    var text: String
-    var createdAt: Date = Date()
+enum SortOption: String, CaseIterable, Identifiable {
+    case dateAdded = "Date Added"
+    case title     = "Title"
+    case author    = "Author"
+    case progress  = "Progress"
+    case format    = "Format"
+    var id: String { rawValue }
+}
+
+enum ViewMode: String, CaseIterable, Identifiable {
+    case list        = "List"
+    case smallGrid   = "Small"
+    case mediumGrid  = "Medium"
+    case largeGrid   = "Large"
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .list:       return "list.bullet"
+        case .smallGrid:  return "square.grid.4x3.fill"
+        case .mediumGrid: return "square.grid.3x3.fill"
+        case .largeGrid:  return "square.grid.2x2.fill"
+        }
+    }
+
+    /// Minimum cell width for the adaptive grid (nil = single-column list).
+    var minCellWidth: CGFloat? {
+        switch self {
+        case .list:       return nil
+        case .smallGrid:  return 100
+        case .mediumGrid: return 150
+        case .largeGrid:  return 210
+        }
+    }
 }
 
 struct Book: Identifiable, Codable {
@@ -41,12 +68,16 @@ struct Book: Identifiable, Codable {
     var progress: Double = 0.0
     var dateAdded: Date = Date()
     var wordCount: Int = 0
-    var coverImageFileName: String? = nil   // feature 8: PDF first-page thumbnail
-    var highlights: [BookHighlight] = []    // feature 9: user highlights
+    var folderID: UUID? = nil
+    var coverFileName: String? = nil
+    var progressUpdated: Date? = nil   // when progress was last changed (for iCloud sync)
+    var contentSnippet: String = ""    // first ~10 KB of plain text, for library content search
 
     var fileURL: URL {
         BookStore.documentsDirectory.appendingPathComponent(fileName)
     }
 
-    var isFinished: Bool { progress >= 0.99 }
+    var coverURL: URL? {
+        coverFileName.map { BookStore.documentsDirectory.appendingPathComponent($0) }
+    }
 }
