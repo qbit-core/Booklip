@@ -1,12 +1,6 @@
 import SwiftUI
 import Combine
 
-// feature 1 & 2: scroll = continuous scroll, paper = single page no-scroll
-enum ReaderDisplayMode: String, Codable {
-    case scroll
-    case paper
-}
-
 struct ColorPreset: Identifiable, Hashable {
     let id: String
     let name: String
@@ -29,36 +23,61 @@ private extension Color {
     }
 }
 
+enum PageEffect: String, CaseIterable, Identifiable {
+    case verticalSlide = "Vertical Slide"
+    case paper         = "Paper Book"
+    var id: String { rawValue }
+}
+
 class ReadingSettings: ObservableObject {
     @Published var fontName:    String = UserDefaults.standard.string(forKey: "fontName")    ?? "Georgia" { didSet { UserDefaults.standard.set(fontName,    forKey: "fontName") } }
     @Published var fontSize:    Double = UserDefaults.standard.double(forKey: "fontSize").nonZero ?? 18.0   { didSet { UserDefaults.standard.set(fontSize,    forKey: "fontSize") } }
     @Published var lineSpacing: Double = UserDefaults.standard.double(forKey: "lineSpacing").nonZero ?? 8.0 { didSet { UserDefaults.standard.set(lineSpacing, forKey: "lineSpacing") } }
     @Published var presetId:    String = UserDefaults.standard.string(forKey: "presetId")    ?? "default" { didSet { UserDefaults.standard.set(presetId,    forKey: "presetId") } }
-    @Published var displayMode: ReaderDisplayMode = {
-        ReaderDisplayMode(rawValue: UserDefaults.standard.string(forKey: "displayMode") ?? "") ?? .scroll
-    }() { didSet { UserDefaults.standard.set(displayMode.rawValue, forKey: "displayMode") } }
+    @Published var pageEffect:  PageEffect = PageEffect(rawValue: UserDefaults.standard.string(forKey: "pageEffect") ?? "") ?? .verticalSlide { didSet { UserDefaults.standard.set(pageEffect.rawValue, forKey: "pageEffect") } }
+    @Published var useEmbeddedFont: Bool = UserDefaults.standard.object(forKey: "useEmbeddedFont") as? Bool ?? true { didSet { UserDefaults.standard.set(useEmbeddedFont, forKey: "useEmbeddedFont") } }
+    @Published var autoScrollSpeed: Double = UserDefaults.standard.double(forKey: "autoScrollSpeed").nonZero ?? 40 { didSet { UserDefaults.standard.set(autoScrollSpeed, forKey: "autoScrollSpeed") } }
 
     var currentPreset: ColorPreset {
         ColorPreset.all.first { $0.id == presetId } ?? ColorPreset.all[0]
     }
 
-    // feature 3: map preset to system color scheme so entire app UI adapts
     var preferredColorScheme: ColorScheme? {
-        switch presetId {
-        case "dark", "forest", "ocean": return .dark
-        default: return .light
-        }
+        let darkPresets: Set<String> = ["dark", "forest", "ocean"]
+        return darkPresets.contains(presetId) ? .dark : .light
     }
 
     var swiftUIFont: Font {
         Font.custom(fontName, size: fontSize)
     }
 
-    static let availableFonts: [String] = [
-        "Georgia", "Times New Roman", "Palatino-Roman", "Baskerville",
-        "HelveticaNeue", "Arial", "Futura-Medium", "GillSans",
-        "AmericanTypewriter", "Courier New",
+    static let availableFonts: [FontOption] = [
+        // Latin
+        FontOption("Georgia",            "Georgia"),
+        FontOption("Times New Roman",    "Times New Roman"),
+        FontOption("Palatino",           "Palatino-Roman"),
+        FontOption("Baskerville",        "Baskerville"),
+        FontOption("Helvetica Neue",     "HelveticaNeue"),
+        FontOption("Arial",              "Arial"),
+        FontOption("Futura",             "Futura-Medium"),
+        FontOption("Gill Sans",          "GillSans"),
+        FontOption("American Typewriter","AmericanTypewriter"),
+        FontOption("Courier New",        "Courier New"),
+        // Korean (한국어)
+        FontOption("본고딕 (Apple SD Gothic Neo)", "AppleSDGothicNeo-Regular"),
+        FontOption("명조 (Apple Myungjo)",         "AppleMyungjo"),
+        FontOption("궁서 (GungSeo)",               "GungSeo"),
     ]
+}
+
+struct FontOption: Identifiable, Hashable {
+    let displayName: String
+    let fontName: String
+    var id: String { fontName }
+    init(_ displayName: String, _ fontName: String) {
+        self.displayName = displayName
+        self.fontName = fontName
+    }
 }
 
 private extension Double {
