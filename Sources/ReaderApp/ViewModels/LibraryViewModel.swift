@@ -63,7 +63,7 @@ class LibraryViewModel: ObservableObject {
 
                 // feature 8: extract first-page thumbnail for PDFs
                 if format == .pdf, let png = Self.extractPDFCover(from: fileURL) {
-                    book.coverImageFileName = BookStore.saveCoverImage(png, bookID: book.id)
+                    book.coverImageFileName = BookStore.saveCover(png, for: fileName)
                 }
 
                 DispatchQueue.main.async {
