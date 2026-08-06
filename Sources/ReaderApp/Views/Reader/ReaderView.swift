@@ -57,6 +57,11 @@ struct ReaderView: View {
             if showBars {
                 VStack {
                     topBar
+                    Text("\(Int(vm.progress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 6)
                     Spacer()
                     VStack(spacing: 0) {
                         if showSearch { searchBar }
@@ -96,9 +101,8 @@ struct ReaderView: View {
                 Text(book.author).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Text("\(Int(vm.progress * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            // Invisible placeholder keeps the title centered
+            Color.clear.frame(width: 32, height: 1)
         }
         .padding(.horizontal)
         .padding(.vertical, 10)

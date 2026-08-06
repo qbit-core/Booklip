@@ -61,6 +61,13 @@ private struct PDFKitView: UIViewRepresentable {
             else       { uiView.goToPreviousPage(nil) }
             let binding = $pageNavigationDirection
             DispatchQueue.main.async { binding.wrappedValue = 0 }
+        } else if abs(progress - context.coordinator.lastReportedProgress) > 0.001,
+                  let doc = uiView.document {
+            // Scrubber moved — seek to the corresponding page.
+            let target = Int(round(progress * Double(max(doc.pageCount - 1, 1))))
+            if let page = doc.page(at: target), page != uiView.currentPage {
+                uiView.go(to: page)
+            }
         }
     }
 
@@ -110,6 +117,12 @@ private struct PDFKitView: NSViewRepresentable {
             else       { nsView.goToPreviousPage(nil) }
             let binding = $pageNavigationDirection
             DispatchQueue.main.async { binding.wrappedValue = 0 }
+        } else if abs(progress - context.coordinator.lastReportedProgress) > 0.001,
+                  let doc = nsView.document {
+            let target = Int(round(progress * Double(max(doc.pageCount - 1, 1))))
+            if let page = doc.page(at: target), page != nsView.currentPage {
+                nsView.go(to: page)
+            }
         }
     }
 
@@ -133,6 +146,9 @@ private func makePDFView() -> PDFView {
 class Coordinator: NSObject, UIGestureRecognizerDelegate {
     @Binding var progress: Double
     var onTap: () -> Void = {}
+    // Tracks the last progress value written by pageChanged so updateUIView/updateNSView
+    // can distinguish scrubber-driven seeks from page-flip-driven updates.
+    var lastReportedProgress: Double = -1
     init(progress: Binding<Double>) { _progress = progress }
 
     @objc func handleTap(_ gesture: Any) { onTap() }
@@ -146,6 +162,10 @@ class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let newProgress = Double(pageIndex) / Double(max(doc.pageCount - 1, 1))
         // PDFViewPageChanged can fire during updateUIView/updateNSView when the
         // document is first assigned — defer so we never write inside a view update.
-        DispatchQueue.main.async { [weak self] in self?.progress = newProgress }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lastReportedProgress = newProgress
+            self.progress = newProgress
+        }
     }
 }
