@@ -6,8 +6,11 @@ struct TextReaderView: View {
     @ObservedObject var settings: ReadingSettings
     @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
-    @Binding var autoScrolling: Bool
-    @Binding var highlightMode: Bool
+    @Binding var pageNavigationDirection: Int
+    var searchQuery: String = ""
+    @Binding var selectedRange: NSRange?
+    @State private var autoScrolling = false
+    @State private var highlightMode = false
 #if os(macOS)
     @StateObject private var eventChannel = TextViewEventChannel()
 #endif
@@ -67,6 +70,7 @@ struct TextReaderView: View {
             },
             progress: progress,
             spokenRange: tts.spokenRange,
+            pageNavigationDirection: $pageNavigationDirection,
             onTap: { showBars.toggle() }
         )
     }
@@ -363,6 +367,7 @@ struct NativeTextView: UIViewRepresentable {
     var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
     @Binding var progress: Double
     var spokenRange: NSRange?
+    var pageNavigationDirection: Binding<Int>? = nil
     let onTap: () -> Void
 
     // Above this length we skip the per-character paragraph-style pass,
@@ -390,6 +395,7 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.textView = textView
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         tap.delegate = context.coordinator
+        tap.delaysTouchesEnded = false
         textView.addGestureRecognizer(tap)
 
         // Horizontal swipes page the same way as the tap zones.
@@ -409,6 +415,14 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.setAutoScrolling(autoScrolling)
         context.coordinator.highlightMode = highlightMode
         context.coordinator.onAddHighlight = onAddHighlight
+
+        // External page navigation (keyboard, hardware buttons).
+        let navDir = pageNavigationDirection?.wrappedValue ?? 0
+        if navDir != 0, let tv = context.coordinator.textView {
+            context.coordinator.page(tv, forward: navDir > 0)
+            let binding = pageNavigationDirection
+            DispatchQueue.main.async { binding?.wrappedValue = 0 }
+        }
         // In highlight mode allow text selection (so the user can pick a range);
         // otherwise selection stays off so taps drive paging.
         textView.isSelectable = highlightMode
@@ -735,7 +749,11 @@ struct NativeTextView: UIViewRepresentable {
         // restore and seeking via the progress bar. Skips values we ourselves
         // reported so it never fights the user's scrolling.
         func syncProgress(_ target: Double, in textView: UITextView) {
-            guard pendingRestore == nil else { return }   // initial restore wins
+            if let pending = pendingRestore {
+                // User explicitly scrubbed to a clearly different position — cancel restore.
+                guard abs(target - pending) > 0.02 else { return }
+                pendingRestore = nil
+            }
             guard textView.bounds.width > 0, textView.textStorage.length > 0 else { return }
             if let lr = lastReportedProgress, abs(lr - target) < 0.0015 { return }
             guard abs(charProgress(textView) - target) > 0.003 else { return }

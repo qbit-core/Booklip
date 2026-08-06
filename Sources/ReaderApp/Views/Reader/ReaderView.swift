@@ -38,7 +38,7 @@ struct ReaderView: View {
                 PDFReaderView(
                     document: vm.pdfDocument,
                     progress: $vm.progress,
-                    displayMode: settings.displayMode,
+                    showBars: $showBars,
                     pageNavigationDirection: $pageNavigationDirection,
                     searchQuery: committedSearchQuery
                 )
