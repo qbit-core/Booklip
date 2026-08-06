@@ -911,7 +911,7 @@ struct NativeTextView: UIViewRepresentable {
 
         private var pageTargetY: CGFloat?   // intended offset while a turn animates
 
-        private func page(_ tv: UITextView, forward: Bool) {
+        func page(_ tv: UITextView, forward: Bool) {
             pendingRestore = nil   // user is navigating — don't let restore reset it
             let inset = tv.textContainerInset.top
             let visible = tv.bounds.height
