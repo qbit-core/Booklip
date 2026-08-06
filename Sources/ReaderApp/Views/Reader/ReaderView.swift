@@ -57,11 +57,6 @@ struct ReaderView: View {
             if showBars {
                 VStack {
                     topBar
-                    Text("\(Int(vm.progress * 100))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 6)
                     Spacer()
                     VStack(spacing: 0) {
                         if showSearch { searchBar }
@@ -114,6 +109,11 @@ struct ReaderView: View {
     private var bottomBar: some View {
         VStack(spacing: 0) {
             ReadingProgressBar(progress: $vm.progress)
+            Text("\(Int(vm.progress * 100))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 4)
             HStack(spacing: 28) {
                 // TTS button
                 Button { showTTS = true } label: {
