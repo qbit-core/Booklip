@@ -390,6 +390,7 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.textView = textView
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         tap.delegate = context.coordinator
+        tap.delaysTouchesEnded = false  // fire without waiting for double-tap window
         textView.addGestureRecognizer(tap)
 
         // Horizontal swipes page the same way as the tap zones.
@@ -845,17 +846,16 @@ struct NativeTextView: UIViewRepresentable {
 
         // Tap zones: left third = page back, right third = page forward, middle = toggle bars.
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard let tv = textView, tv.bounds.width > 0 else { onTap(); return }
-            if highlightMode { onTap(); return }   // let selection work; don't page
+            guard let tv = textView, tv.bounds.width > 0 else { return }
+            if highlightMode { return }
             let x = gesture.location(in: tv).x
             let w = tv.bounds.width
             if x < w * 0.30 {
                 page(tv, forward: false)
             } else if x > w * 0.70 {
                 page(tv, forward: true)
-            } else {
-                onTap()
             }
+            // Middle third: bar toggle is handled by the SwiftUI overlay in ReaderView.
         }
 
         // Swipe right = page forward (like tapping the right), swipe left = back.
