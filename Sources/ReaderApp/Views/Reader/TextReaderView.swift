@@ -851,8 +851,8 @@ struct NativeTextView: UIViewRepresentable {
             guard !isScrollingProgrammatically, let tv = textView else { return }
             guard tv.bounds.width > 0, tv.textStorage.length > 0 else { return }
             let value = charProgress(tv)
-            lastReportedProgress = value   // remember so syncProgress won't bounce back
-            progress = value
+            lastReportedProgress = value
+            DispatchQueue.main.async { [weak self] in self?.progress = value }
         }
 
         // Fire immediately alongside UITextView's own recognizers — no waiting for their failure.
