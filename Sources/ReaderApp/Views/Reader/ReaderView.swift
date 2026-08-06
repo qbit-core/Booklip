@@ -78,14 +78,11 @@ struct ReaderView: View {
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
         // feature 1: Tab / arrow keys navigate pages (hardware keyboard on iPad/macOS)
         .focusable()
-        .onKeyPress(.tab) { press in
-            pageNavigationDirection = press.modifiers.contains(.shift) ? -1 : 1
-            return .handled
-        }
-        .onKeyPress(.rightArrow) { _ in pageNavigationDirection = 1;  return .handled }
-        .onKeyPress(.leftArrow)  { _ in pageNavigationDirection = -1; return .handled }
-        .onKeyPress(.pageDown)   { _ in pageNavigationDirection = 1;  return .handled }
-        .onKeyPress(.pageUp)     { _ in pageNavigationDirection = -1; return .handled }
+        .onKeyPress(.tab)        { pageNavigationDirection = 1;  return .handled }
+        .onKeyPress(.rightArrow) { pageNavigationDirection = 1;  return .handled }
+        .onKeyPress(.leftArrow)  { pageNavigationDirection = -1; return .handled }
+        .onKeyPress(.pageDown)   { pageNavigationDirection = 1;  return .handled }
+        .onKeyPress(.pageUp)     { pageNavigationDirection = -1; return .handled }
     }
 
     // MARK: - Top bar
@@ -131,7 +128,7 @@ struct ReaderView: View {
                 } label: {
                     Image(systemName: "magnifyingglass")
                         .font(.title2)
-                        .foregroundStyle(showSearch ? .accentColor : .primary)
+                        .foregroundStyle(showSearch ? Color.accentColor : Color.primary)
                 }
 
                 // feature 9: highlight selected text (text books only)
@@ -186,11 +183,11 @@ struct ReaderView: View {
         guard range.location < totalChars else { return }
         let safeLen = min(range.length, totalChars - range.location)
         guard safeLen > 0 else { return }
+        let nsRange = NSRange(location: range.location, length: safeLen)
         let nsText = vm.plainText as NSString
-        let text = nsText.substring(with: NSRange(location: range.location, length: safeLen))
-        let highlight = BookHighlight(startOffset: range.location, length: safeLen, text: text)
-        library.addHighlight(highlight, to: book.id)
-        vm.addHighlight(highlight)
+        let snippet = String(nsText.substring(with: nsRange).prefix(80))
+        let progress = totalChars > 0 ? Double(range.location) / Double(totalChars) : 0
+        vm.addHighlight(range: nsRange, colorName: "yellow", snippet: snippet, progress: progress)
         selectedTextRange = nil
     }
 

@@ -4,8 +4,8 @@ import Combine
 struct TextReaderView: View {
     @ObservedObject var vm: ReaderViewModel
     @ObservedObject var settings: ReadingSettings
-    @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
+    @ObservedObject var tts: TTSManager
     @Binding var pageNavigationDirection: Int
     var searchQuery: String = ""
     @Binding var selectedRange: NSRange?
