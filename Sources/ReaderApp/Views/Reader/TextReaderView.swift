@@ -415,6 +415,7 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.setAutoScrolling(autoScrolling)
         context.coordinator.highlightMode = highlightMode
         context.coordinator.onAddHighlight = onAddHighlight
+        context.coordinator.userHighlights = highlights
 
         // External page navigation (keyboard, hardware buttons).
         let navDir = pageNavigationDirection?.wrappedValue ?? 0
@@ -646,6 +647,7 @@ struct NativeTextView: UIViewRepresentable {
         // Highlights
         var highlightMode = false
         var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
+        var userHighlights: [Highlight] = []
 
         init(progress: Binding<Double>, autoScrolling: Binding<Bool>, onTap: @escaping () -> Void) {
             _progress = progress
@@ -690,25 +692,27 @@ struct NativeTextView: UIViewRepresentable {
 
         func updateHighlight(_ range: NSRange?, in textView: UITextView, color: UIColor) {
             guard !sameRange(range, lastHighlight) else { return }
-            let lm = textView.layoutManager
             let storage = textView.textStorage
-            // Temporary attributes live only in the layout manager — they don't
-            // touch NSTextStorage, so user highlight colors are never disturbed
-            // and stale highlights can't accumulate across content rebuilds.
-            if let old = lastHighlight, NSMaxRange(old) <= storage.length {
-                lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: old)
-            }
             lastHighlight = range
+            guard storage.length > 0 else { return }
+            // Clear ALL background colors from the full text, then reapply user
+            // highlights and the new TTS highlight atomically. This guarantees
+            // exactly one TTS-highlighted region regardless of prior state.
+            let full = NSRange(location: 0, length: storage.length)
+            storage.removeAttribute(.backgroundColor, range: full)
+            for h in userHighlights where NSMaxRange(h.range) <= storage.length {
+                let c = UIColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow)
+                    .withAlphaComponent(0.4)
+                storage.addAttribute(.backgroundColor, value: c, range: h.range)
+            }
             if let r = range, NSMaxRange(r) <= storage.length {
-                lm.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: r)
+                storage.addAttribute(.backgroundColor, value: color, range: r)
                 isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
                 isScrollingProgrammatically = false
-                if storage.length > 0 {
-                    let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
-                    lastReportedProgress = v
-                    DispatchQueue.main.async { [weak self] in self?.progress = v }
-                }
+                let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
+                lastReportedProgress = v
+                DispatchQueue.main.async { [weak self] in self?.progress = v }
             }
         }
 
