@@ -153,11 +153,17 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             let paraText  = ns.substring(with: paraRange)
             guard !paraText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
 
+            // Replace single \n with spaces so NLTokenizer sees
+            // "...emeralds. The soldier..." instead of "...emeralds.\nThe soldier..."
+            // and correctly splits at the period. Character count is preserved
+            // (\n and space are both 1 UTF-16 unit) so all NSRange offsets stay valid.
+            let normalized = paraText.replacingOccurrences(of: "\n", with: " ")
+
             let tokenizer = NLTokenizer(unit: .sentence)
-            tokenizer.string = paraText
+            tokenizer.string = normalized
             var found = false
-            tokenizer.enumerateTokens(in: paraText.startIndex..<paraText.endIndex) { range, _ in
-                let local = NSRange(range, in: paraText)
+            tokenizer.enumerateTokens(in: normalized.startIndex..<normalized.endIndex) { range, _ in
+                let local = NSRange(range, in: normalized)
                 if local.length > 0 {
                     result.append(NSRange(location: start + local.location, length: local.length))
                     found = true
@@ -187,9 +193,6 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             speakCurrentSentence()
             return
         }
-        // Highlight the full sentence before the utterance starts so the view
-        // scrolls to it immediately rather than waiting for the first word callback.
-        spokenRange = range
         let utterance = AVSpeechUtterance(string: sentence)
         utterance.voice = selectedVoice
         utterance.rate = rate
