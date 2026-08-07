@@ -25,8 +25,16 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
 
     private var fullText: NSString = ""
+    /// Sentence-level ranges for highlight lookup.
     private var sentenceRanges: [NSRange] = []
-    private var currentSentenceIndex = 0
+    /// Paragraph-level chunks — each becomes one AVSpeechUtterance.
+    /// Larger chunks eliminate the gap between utterances that causes cumulative drift.
+    private var chunkRanges: [NSRange] = []
+    private var currentChunkIndex = 0
+    /// Global UTF-16 offset of the first character of the current utterance.
+    /// Set before synthesizer.speak() so willSpeakRangeOfSpeechString can map
+    /// characterRange → global position → sentence.
+    private var chunkBaseOffset = 0
 
     // Cached once — speechVoices() hits an AVFoundation internal decoder on
     // repeated calls which logs a DecodingError and can return an empty list.
@@ -72,11 +80,10 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         synthesizer.stopSpeaking(at: .immediate)
         fullText = text as NSString
         sentenceRanges = makeSentenceRanges(in: text)
-        // Start from the sentence that contains or starts at/after offset.
-        currentSentenceIndex = sentenceRanges.firstIndex {
-            $0.location + $0.length > offset
-        } ?? 0
-        speakCurrentSentence()
+        chunkRanges = makeParagraphChunks(in: text)
+        // Start at the chunk that contains or starts at/after offset.
+        currentChunkIndex = chunkRanges.firstIndex { NSMaxRange($0) > offset } ?? 0
+        speakCurrentChunk()
     }
 
     func pause() {
@@ -93,7 +100,9 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
         sentenceRanges = []
-        currentSentenceIndex = 0
+        chunkRanges = []
+        currentChunkIndex = 0
+        chunkBaseOffset = 0
         isPlaying = false
         spokenRange = nil
     }
@@ -122,6 +131,41 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         } else {
             speak(text: text, from: currentOffset)
         }
+    }
+
+    // MARK: - Chunking
+
+    /// Splits text at paragraph breaks (2+ newlines). Each paragraph becomes one utterance
+    /// so there are no inter-utterance gaps. willSpeakRangeOfSpeechString fires per-word
+    /// inside each chunk, giving exact synchronization.
+    private func makeParagraphChunks(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        let totalLength = ns.length
+        var result: [NSRange] = []
+
+        var breakRanges: [NSRange] = [NSRange(location: 0, length: 0)]
+        if let regex = try? NSRegularExpression(pattern: "\\n{2,}") {
+            regex.enumerateMatches(in: text,
+                                   range: NSRange(location: 0, length: totalLength)) { m, _, _ in
+                if let r = m?.range { breakRanges.append(r) }
+            }
+        }
+        breakRanges.append(NSRange(location: totalLength, length: 0))
+
+        for i in 0..<breakRanges.count - 1 {
+            let start = NSMaxRange(breakRanges[i])
+            let end   = breakRanges[i + 1].location
+            guard end > start else { continue }
+            let range = NSRange(location: start, length: end - start)
+            let paraText = ns.substring(with: range)
+            guard !paraText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            result.append(range)
+        }
+
+        if result.isEmpty, !text.isEmpty {
+            result.append(NSRange(location: 0, length: totalLength))
+        }
+        return result
     }
 
     // MARK: - Sentence segmentation
@@ -179,21 +223,20 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         return result
     }
 
-    private func speakCurrentSentence() {
-        guard currentSentenceIndex < sentenceRanges.count else {
+    // MARK: - Playback
+
+    private func speakCurrentChunk() {
+        guard currentChunkIndex < chunkRanges.count else {
             isPlaying = false
             spokenRange = nil
             return
         }
-        let range = sentenceRanges[currentSentenceIndex]
-        let sentence = fullText.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sentence.isEmpty else {
-            // Skip blank/whitespace-only sentences.
-            currentSentenceIndex += 1
-            speakCurrentSentence()
-            return
-        }
-        let utterance = AVSpeechUtterance(string: sentence)
+        let range = chunkRanges[currentChunkIndex]
+        // Store before speak() so willSpeakRangeOfSpeechString can map offsets.
+        chunkBaseOffset = range.location
+        // Do NOT trim — trimming shifts characterRange offsets and breaks the mapping.
+        let text = fullText.substring(with: range)
+        let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = rate
         utterance.pitchMultiplier = pitch
@@ -206,18 +249,26 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        willSpeakRangeOfSpeechString characterRange: NSRange,
                                        utterance: AVSpeechUtterance) {
-        // Keep spokenRange at the full sentence — do not narrow it to the word range.
+        // characterRange is relative to the utterance string (= paragraph chunk).
+        // Map it to a global position in fullText, then find the sentence
+        // containing that position and update spokenRange.
         Task { @MainActor [self] in
-            guard currentSentenceIndex < sentenceRanges.count else { return }
-            spokenRange = sentenceRanges[currentSentenceIndex]
+            let globalPos = chunkBaseOffset + characterRange.location
+            guard let sentence = sentenceRanges.first(where: {
+                $0.location <= globalPos && globalPos < NSMaxRange($0)
+            }) else { return }
+            // Only publish when the sentence actually changes (avoids redundant updates
+            // for every word within the same sentence).
+            if let current = spokenRange, NSEqualRanges(current, sentence) { return }
+            spokenRange = sentence
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor [self] in
-            currentSentenceIndex += 1
-            speakCurrentSentence()
+            currentChunkIndex += 1
+            speakCurrentChunk()
         }
     }
 }
