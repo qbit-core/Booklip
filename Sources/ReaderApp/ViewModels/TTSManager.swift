@@ -127,34 +127,48 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // MARK: - Sentence segmentation
 
     private func makeSentenceRanges(in text: String) -> [NSRange] {
-        // Split at newlines first so paragraph/dialogue boundaries always act as
-        // sentence breaks — NLTokenizer alone won't split at "Dorothy asked:\n"
-        // because the colon signals continuation to the tokenizer.
+        // Split at paragraph breaks (2+ consecutive newlines) first, then use
+        // NLTokenizer within each paragraph for period/question/exclamation
+        // boundaries. Single \n is just source line-wrapping — not a sentence break.
+        let ns = text as NSString
+        let totalLength = ns.length
         var result: [NSRange] = []
-        var charOffset = 0
-        for line in text.components(separatedBy: "\n") {
-            let lineLen = (line as NSString).length
-            defer { charOffset += lineLen + 1 }  // +1 for the '\n'
-            guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+
+        // Collect paragraph-break ranges in UTF-16 units so they stay in sync
+        // with NSRange / NSString offsets throughout.
+        var breakRanges: [NSRange] = [NSRange(location: 0, length: 0)]
+        if let regex = try? NSRegularExpression(pattern: "\\n{2,}") {
+            regex.enumerateMatches(in: text,
+                                   range: NSRange(location: 0, length: totalLength)) { m, _, _ in
+                if let r = m?.range { breakRanges.append(r) }
+            }
+        }
+        breakRanges.append(NSRange(location: totalLength, length: 0))
+
+        for i in 0..<breakRanges.count - 1 {
+            let start = NSMaxRange(breakRanges[i])
+            let end   = breakRanges[i + 1].location
+            guard end > start else { continue }
+            let paraRange = NSRange(location: start, length: end - start)
+            let paraText  = ns.substring(with: paraRange)
+            guard !paraText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
 
             let tokenizer = NLTokenizer(unit: .sentence)
-            tokenizer.string = line
-            var sentencesInLine: [NSRange] = []
-            tokenizer.enumerateTokens(in: line.startIndex..<line.endIndex) { range, _ in
-                let ns = NSRange(range, in: line)
-                if ns.length > 0 {
-                    sentencesInLine.append(NSRange(location: charOffset + ns.location, length: ns.length))
+            tokenizer.string = paraText
+            var found = false
+            tokenizer.enumerateTokens(in: paraText.startIndex..<paraText.endIndex) { range, _ in
+                let local = NSRange(range, in: paraText)
+                if local.length > 0 {
+                    result.append(NSRange(location: start + local.location, length: local.length))
+                    found = true
                 }
                 return true
             }
-            if sentencesInLine.isEmpty {
-                result.append(NSRange(location: charOffset, length: lineLen))
-            } else {
-                result.append(contentsOf: sentencesInLine)
-            }
+            if !found { result.append(paraRange) }
         }
+
         if result.isEmpty, !text.isEmpty {
-            result.append(NSRange(location: 0, length: (text as NSString).length))
+            result.append(NSRange(location: 0, length: totalLength))
         }
         return result
     }
