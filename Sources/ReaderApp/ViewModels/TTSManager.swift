@@ -114,19 +114,36 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // MARK: - Sentence segmentation
 
     private func makeSentenceRanges(in text: String) -> [NSRange] {
-        let tokenizer = NLTokenizer(unit: .sentence)
-        tokenizer.string = text
-        var ranges: [NSRange] = []
-        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
-            let ns = NSRange(range, in: text)
-            if ns.length > 0 { ranges.append(ns) }
-            return true
+        // Split at newlines first so paragraph/dialogue boundaries always act as
+        // sentence breaks — NLTokenizer alone won't split at "Dorothy asked:\n"
+        // because the colon signals continuation to the tokenizer.
+        var result: [NSRange] = []
+        var charOffset = 0
+        for line in text.components(separatedBy: "\n") {
+            let lineLen = (line as NSString).length
+            defer { charOffset += lineLen + 1 }  // +1 for the '\n'
+            guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+
+            let tokenizer = NLTokenizer(unit: .sentence)
+            tokenizer.string = line
+            var sentencesInLine: [NSRange] = []
+            tokenizer.enumerateTokens(in: line.startIndex..<line.endIndex) { range, _ in
+                let ns = NSRange(range, in: line)
+                if ns.length > 0 {
+                    sentencesInLine.append(NSRange(location: charOffset + ns.location, length: ns.length))
+                }
+                return true
+            }
+            if sentencesInLine.isEmpty {
+                result.append(NSRange(location: charOffset, length: lineLen))
+            } else {
+                result.append(contentsOf: sentencesInLine)
+            }
         }
-        // Fallback: if tokenizer produced nothing (empty/whitespace-only text), treat whole text.
-        if ranges.isEmpty, !text.isEmpty {
-            ranges.append(NSRange(location: 0, length: (text as NSString).length))
+        if result.isEmpty, !text.isEmpty {
+            result.append(NSRange(location: 0, length: (text as NSString).length))
         }
-        return ranges
+        return result
     }
 
     private func speakCurrentSentence() {
