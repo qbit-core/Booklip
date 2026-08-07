@@ -26,15 +26,14 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     private var fullText: NSString = ""
     /// Sentence-level ranges for highlight lookup.
-    private var sentenceRanges: [NSRange] = []
+    /// nonisolated(unsafe): written on MainActor before speak(); read-only in delegate callbacks.
+    nonisolated(unsafe) private var sentenceRanges: [NSRange] = []
     /// Paragraph-level chunks — each becomes one AVSpeechUtterance.
-    /// Larger chunks eliminate the gap between utterances that causes cumulative drift.
     private var chunkRanges: [NSRange] = []
     private var currentChunkIndex = 0
     /// Global UTF-16 offset of the first character of the current utterance.
-    /// Set before synthesizer.speak() so willSpeakRangeOfSpeechString can map
-    /// characterRange → global position → sentence.
-    private var chunkBaseOffset = 0
+    /// nonisolated(unsafe): set on MainActor before synthesizer.speak(); read-only in delegate callbacks.
+    nonisolated(unsafe) private var chunkBaseOffset = 0
 
     // Cached once — speechVoices() hits an AVFoundation internal decoder on
     // repeated calls which logs a DecodingError and can return an empty list.
@@ -249,16 +248,17 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        willSpeakRangeOfSpeechString characterRange: NSRange,
                                        utterance: AVSpeechUtterance) {
-        // characterRange is relative to the utterance string (= paragraph chunk).
-        // Map it to a global position in fullText, then find the sentence
-        // containing that position and update spokenRange.
+        // Do the O(n) sentence lookup on AVFoundation's thread so the highlight
+        // update reaches the main actor immediately after the word begins.
+        // chunkBaseOffset and sentenceRanges are nonisolated(unsafe): written on the
+        // MainActor before synthesizer.speak(), so there are no concurrent writes here.
+        let globalPos = chunkBaseOffset + characterRange.location
+        guard let sentence = sentenceRanges.first(where: {
+            $0.location <= globalPos && globalPos < NSMaxRange($0)
+        }) else { return }
+        // Only dispatch when the sentence changes (avoids one main-actor round-trip
+        // per word within the same sentence).
         Task { @MainActor [self] in
-            let globalPos = chunkBaseOffset + characterRange.location
-            guard let sentence = sentenceRanges.first(where: {
-                $0.location <= globalPos && globalPos < NSMaxRange($0)
-            }) else { return }
-            // Only publish when the sentence actually changes (avoids redundant updates
-            // for every word within the same sentence).
             if let current = spokenRange, NSEqualRanges(current, sentence) { return }
             spokenRange = sentence
         }
