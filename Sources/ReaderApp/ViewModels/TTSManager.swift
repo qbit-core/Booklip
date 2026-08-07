@@ -28,17 +28,9 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var sentenceRanges: [NSRange] = []
     private var currentSentenceIndex = 0
 
-    var availableVoices: [AVSpeechSynthesisVoice] {
-        AVSpeechSynthesisVoice.speechVoices()
-            .filter { voice in
-                let lang = voice.language.lowercased()
-                let name = voice.name.lowercased()
-                return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
-                    (name.contains("yuna") || name.contains("eddy") ||
-                     name.contains("flo") || name.contains("samantha"))
-            }
-            .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
-    }
+    // Cached once — speechVoices() hits an AVFoundation internal decoder on
+    // repeated calls which logs a DecodingError and can return an empty list.
+    @Published private(set) var availableVoices: [AVSpeechSynthesisVoice] = []
 
     var selectedVoice: AVSpeechSynthesisVoice? {
         availableVoices.first { $0.identifier == selectedVoiceID } ?? availableVoices.first
@@ -47,10 +39,31 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synthesizer.delegate = self
-        selectedVoiceID = availableVoices.first?.identifier ?? ""
 #if os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
 #endif
+        refreshVoices()
+    }
+
+    func refreshVoices() {
+        let all = AVSpeechSynthesisVoice.speechVoices()
+        // Prefer high-quality named voices; fall back to any en-US / ko-KR voice.
+        let preferred = all.filter { voice in
+            let lang = voice.language.lowercased()
+            let name = voice.name.lowercased()
+            return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
+                (name.contains("yuna") || name.contains("eddy") ||
+                 name.contains("flo") || name.contains("samantha"))
+        }
+        let voices = preferred.isEmpty
+            ? all.filter { $0.language.lowercased().hasPrefix("en-us") || $0.language.lowercased().hasPrefix("ko-kr") }
+            : preferred
+        availableVoices = voices.sorted {
+            $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
+        }
+        if selectedVoiceID.isEmpty || !availableVoices.contains(where: { $0.identifier == selectedVoiceID }) {
+            selectedVoiceID = availableVoices.first?.identifier ?? ""
+        }
     }
 
     // MARK: - Public API
