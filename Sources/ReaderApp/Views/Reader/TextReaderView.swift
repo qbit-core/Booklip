@@ -690,21 +690,20 @@ struct NativeTextView: UIViewRepresentable {
 
         func updateHighlight(_ range: NSRange?, in textView: UITextView, color: UIColor) {
             guard !sameRange(range, lastHighlight) else { return }
+            let lm = textView.layoutManager
             let storage = textView.textStorage
-            // Clear previous highlight
+            // Temporary attributes live only in the layout manager — they don't
+            // touch NSTextStorage, so user highlight colors are never disturbed
+            // and stale highlights can't accumulate across content rebuilds.
             if let old = lastHighlight, NSMaxRange(old) <= storage.length {
-                storage.removeAttribute(.backgroundColor, range: old)
+                lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: old)
             }
             lastHighlight = range
-            // Apply new highlight + scroll it into view
             if let r = range, NSMaxRange(r) <= storage.length {
-                storage.addAttribute(.backgroundColor, value: color, range: r)
+                lm.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: r)
                 isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
                 isScrollingProgrammatically = false
-                // Follow TTS with the progress bar so closing saves the spoken
-                // position (and reopening + play resumes from there).
-                // Defer the write so it never fires inside updateUIView.
                 if storage.length > 0 {
                     let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
                     lastReportedProgress = v
