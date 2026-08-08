@@ -212,10 +212,15 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             }
             if nlRanges.isEmpty { nlRanges.append(paraRange) }
 
-            // NLTokenizer sometimes doesn't split at periods inside closing quotes
-            // (e.g. `Great Oz."  "Step inside,"`). Split any token > 150 chars at
-            // [.?!]["'»]? followed by whitespace and an uppercase letter or opening quote.
-            let splitRegex = try? NSRegularExpression(pattern: #"[.?!][\"'»“”]?\s+(?=[A-Z“\"])"#)
+            // NLTokenizer doesn't split at sentence boundaries embedded in quoted
+            // dialogue (e.g. `perplexity. "He is powerful`). Post-split any
+            // token > 150 chars at: sentence-ending punct + optional closing quote
+            // (straight or curly) + whitespace + uppercase or opening quote.
+            // Split using ICU Unicode property classes so no curly-quote literals
+            // appear in source. \p{Pf} = final quotes (" ’ etc.),
+            // \p{Pi} = initial quotes (" ‘ etc.).
+            let splitPattern = "[.?!]\\p{Pf}?\\s+(?=[A-Z\\p{Pi}])"
+            let splitRegex = try? NSRegularExpression(pattern: splitPattern)
             for nr in nlRanges {
                 guard nr.length > 150, let regex = splitRegex else { result.append(nr); continue }
                 let sub = ns.substring(with: nr)
