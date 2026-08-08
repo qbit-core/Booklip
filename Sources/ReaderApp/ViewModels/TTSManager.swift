@@ -204,16 +204,33 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
             let tokenizer = NLTokenizer(unit: .sentence)
             tokenizer.string = normalized
-            var found = false
+            var nlRanges: [NSRange] = []
             tokenizer.enumerateTokens(in: normalized.startIndex..<normalized.endIndex) { range, _ in
                 let local = NSRange(range, in: normalized)
-                if local.length > 0 {
-                    result.append(NSRange(location: start + local.location, length: local.length))
-                    found = true
-                }
+                if local.length > 0 { nlRanges.append(NSRange(location: start + local.location, length: local.length)) }
                 return true
             }
-            if !found { result.append(paraRange) }
+            if nlRanges.isEmpty { nlRanges.append(paraRange) }
+
+            // NLTokenizer sometimes doesn't split at periods inside closing quotes
+            // (e.g. `Great Oz."  "Step inside,"`). Split any token > 150 chars at
+            // [.?!]["'»]? followed by whitespace and an uppercase letter or opening quote.
+            let splitRegex = try? NSRegularExpression(pattern: #"[.?!][\"'»“”]?\s+(?=[A-Z“\"])"#)
+            for nr in nlRanges {
+                guard nr.length > 150, let regex = splitRegex else { result.append(nr); continue }
+                let sub = ns.substring(with: nr)
+                var subBreaks: [NSRange] = [NSRange(location: 0, length: 0)]
+                regex.enumerateMatches(in: sub, range: NSRange(location: 0, length: (sub as NSString).length)) { m, _, _ in
+                    if let r = m?.range { subBreaks.append(NSRange(location: r.location + r.length, length: 0)) }
+                }
+                subBreaks.append(NSRange(location: (sub as NSString).length, length: 0))
+                for j in 0..<subBreaks.count - 1 {
+                    let s2 = subBreaks[j].location
+                    let e2 = subBreaks[j + 1].location
+                    guard e2 > s2 else { continue }
+                    result.append(NSRange(location: nr.location + s2, length: e2 - s2))
+                }
+            }
         }
 
         if result.isEmpty, !text.isEmpty {
