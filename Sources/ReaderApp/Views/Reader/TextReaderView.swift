@@ -707,12 +707,35 @@ struct NativeTextView: UIViewRepresentable {
             }
             if let r = range, NSMaxRange(r) <= storage.length {
                 storage.addAttribute(.backgroundColor, value: color, range: r)
-                isScrollingProgrammatically = true
-                textView.scrollRangeToVisible(r)
-                isScrollingProgrammatically = false
+                scrollToSentence(r, in: textView)
                 let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
                 lastReportedProgress = v
                 DispatchQueue.main.async { [weak self] in self?.progress = v }
+            }
+        }
+
+        // In vertical-slide mode: smooth-scroll to the highlighted range.
+        // In paper mode: flip to the page containing the range only when
+        // the range is outside the current visible area and no flip is pending.
+        private func scrollToSentence(_ r: NSRange, in textView: UITextView) {
+            if pageEffect == .paper {
+                guard pageTargetY == nil else { return }
+                let lm = textView.layoutManager
+                let tc = textView.textContainer
+                let glyphRange = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+                let rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+                let sentenceTop = rect.minY + textView.textContainerInset.top
+                let visibleTop = textView.contentOffset.y
+                let visibleBottom = visibleTop + textView.bounds.height
+                if sentenceTop >= visibleBottom {
+                    page(textView, forward: true)
+                } else if rect.maxY + textView.textContainerInset.top < visibleTop {
+                    page(textView, forward: false)
+                }
+            } else {
+                isScrollingProgrammatically = true
+                textView.scrollRangeToVisible(r)
+                isScrollingProgrammatically = false
             }
         }
 
