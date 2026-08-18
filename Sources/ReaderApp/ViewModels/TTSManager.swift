@@ -170,78 +170,59 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // MARK: - Sentence segmentation
 
     private func makeSentenceRanges(in text: String) -> [NSRange] {
-        // Split at paragraph breaks (2+ consecutive newlines) first, then use
-        // NLTokenizer within each paragraph for period/question/exclamation
-        // boundaries. Single \n is just source line-wrapping — not a sentence break.
         let ns = text as NSString
         let totalLength = ns.length
+
+        // Normalize every newline variant to a space (1 UTF-16 unit → 1 UTF-16 unit)
+        // so all NSRange offsets stay valid and NLTokenizer sees complete sentences
+        // regardless of how EPUB / plain-text paragraph breaks are encoded
+        // (\n, \r\n, \r, or multiple consecutive newlines).
+        var norm = text
+        // \r\n is 2 chars → replace with 2 spaces to preserve offsets
+        if let rn = try? NSRegularExpression(pattern: "\\r\\n") {
+            norm = rn.stringByReplacingMatches(in: norm,
+                                               range: NSRange(location: 0, length: (norm as NSString).length),
+                                               withTemplate: "  ")
+        }
+        norm = norm.replacingOccurrences(of: "\r", with: " ")
+        norm = norm.replacingOccurrences(of: "\n", with: " ")
+
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = norm
+        var nlRanges: [NSRange] = []
+        tokenizer.enumerateTokens(in: norm.startIndex..<norm.endIndex) { range, _ in
+            let r = NSRange(range, in: norm)
+            if r.length > 0 { nlRanges.append(r) }
+            return true
+        }
+        if nlRanges.isEmpty {
+            return [NSRange(location: 0, length: totalLength)]
+        }
+
+        // NLTokenizer sometimes merges consecutive sentences (e.g. quoted dialogue).
+        // Post-split any token at sentence-ending punctuation + optional closing quote
+        // + whitespace + uppercase or opening quote.
+        // Use ICU Unicode property classes (\p{Pf}/\p{Pi}) so no curly-quote literals
+        // appear in source code.
+        let splitPattern = "[.?!]\\p{Pf}?\\s+(?=[A-Z\\p{Pi}])"
+        let splitRegex = try? NSRegularExpression(pattern: splitPattern)
         var result: [NSRange] = []
-
-        // Collect paragraph-break ranges in UTF-16 units so they stay in sync
-        // with NSRange / NSString offsets throughout.
-        var breakRanges: [NSRange] = [NSRange(location: 0, length: 0)]
-        if let regex = try? NSRegularExpression(pattern: "\\n{2,}") {
-            regex.enumerateMatches(in: text,
-                                   range: NSRange(location: 0, length: totalLength)) { m, _, _ in
-                if let r = m?.range { breakRanges.append(r) }
+        for nr in nlRanges {
+            guard let regex = splitRegex, nr.length > 60 else { result.append(nr); continue }
+            let sub = ns.substring(with: nr)
+            var subBreaks: [NSRange] = [NSRange(location: 0, length: 0)]
+            regex.enumerateMatches(in: sub,
+                                   range: NSRange(location: 0, length: (sub as NSString).length)) { m, _, _ in
+                if let r = m?.range { subBreaks.append(NSRange(location: r.location + r.length, length: 0)) }
+            }
+            subBreaks.append(NSRange(location: (sub as NSString).length, length: 0))
+            for j in 0..<subBreaks.count - 1 {
+                let s2 = subBreaks[j].location, e2 = subBreaks[j + 1].location
+                guard e2 > s2 else { continue }
+                result.append(NSRange(location: nr.location + s2, length: e2 - s2))
             }
         }
-        breakRanges.append(NSRange(location: totalLength, length: 0))
-
-        for i in 0..<breakRanges.count - 1 {
-            let start = NSMaxRange(breakRanges[i])
-            let end   = breakRanges[i + 1].location
-            guard end > start else { continue }
-            let paraRange = NSRange(location: start, length: end - start)
-            let paraText  = ns.substring(with: paraRange)
-            guard !paraText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-
-            // Replace single \n with spaces so NLTokenizer sees
-            // "...emeralds. The soldier..." instead of "...emeralds.\nThe soldier..."
-            // and correctly splits at the period. Character count is preserved
-            // (\n and space are both 1 UTF-16 unit) so all NSRange offsets stay valid.
-            let normalized = paraText.replacingOccurrences(of: "\n", with: " ")
-
-            let tokenizer = NLTokenizer(unit: .sentence)
-            tokenizer.string = normalized
-            var nlRanges: [NSRange] = []
-            tokenizer.enumerateTokens(in: normalized.startIndex..<normalized.endIndex) { range, _ in
-                let local = NSRange(range, in: normalized)
-                if local.length > 0 { nlRanges.append(NSRange(location: start + local.location, length: local.length)) }
-                return true
-            }
-            if nlRanges.isEmpty { nlRanges.append(paraRange) }
-
-            // NLTokenizer doesn't split at sentence boundaries embedded in quoted
-            // dialogue (e.g. `perplexity. "He is powerful`). Post-split any
-            // token > 150 chars at: sentence-ending punct + optional closing quote
-            // (straight or curly) + whitespace + uppercase or opening quote.
-            // Split using ICU Unicode property classes so no curly-quote literals
-            // appear in source. \p{Pf} = final quotes (" ’ etc.),
-            // \p{Pi} = initial quotes (" ‘ etc.).
-            let splitPattern = "[.?!]\\p{Pf}?\\s+(?=[A-Z\\p{Pi}])"
-            let splitRegex = try? NSRegularExpression(pattern: splitPattern)
-            for nr in nlRanges {
-                guard nr.length > 150, let regex = splitRegex else { result.append(nr); continue }
-                let sub = ns.substring(with: nr)
-                var subBreaks: [NSRange] = [NSRange(location: 0, length: 0)]
-                regex.enumerateMatches(in: sub, range: NSRange(location: 0, length: (sub as NSString).length)) { m, _, _ in
-                    if let r = m?.range { subBreaks.append(NSRange(location: r.location + r.length, length: 0)) }
-                }
-                subBreaks.append(NSRange(location: (sub as NSString).length, length: 0))
-                for j in 0..<subBreaks.count - 1 {
-                    let s2 = subBreaks[j].location
-                    let e2 = subBreaks[j + 1].location
-                    guard e2 > s2 else { continue }
-                    result.append(NSRange(location: nr.location + s2, length: e2 - s2))
-                }
-            }
-        }
-
-        if result.isEmpty, !text.isEmpty {
-            result.append(NSRange(location: 0, length: totalLength))
-        }
-        return result
+        return result.isEmpty ? [NSRange(location: 0, length: totalLength)] : result
     }
 
     // MARK: - Playback
