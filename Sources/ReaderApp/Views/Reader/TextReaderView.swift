@@ -979,7 +979,7 @@ struct NativeTextView: UIViewRepresentable {
             transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             switch pageEffect {
             case .verticalSlide:
-                transition.subtype = forward ? .fromBottom : .fromTop
+                transition.subtype = forward ? .fromTop : .fromBottom
             case .paper:
                 transition.subtype = forward ? .fromRight : .fromLeft
             }
