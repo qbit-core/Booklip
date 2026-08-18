@@ -174,55 +174,42 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let ns = text as NSString
         let totalLength = ns.length
 
-        // Normalize every newline variant to a space (1 UTF-16 unit → 1 UTF-16 unit)
-        // so all NSRange offsets stay valid and NLTokenizer sees complete sentences
-        // regardless of how EPUB / plain-text paragraph breaks are encoded
-        // (\n, \r\n, \r, or multiple consecutive newlines).
-        var norm = text
-        // \r\n is 2 chars → replace with 2 spaces to preserve offsets
-        if let rn = try? NSRegularExpression(pattern: "\\r\\n") {
-            norm = rn.stringByReplacingMatches(in: norm,
-                                               range: NSRange(location: 0, length: (norm as NSString).length),
-                                               withTemplate: "  ")
-        }
-        norm = norm.replacingOccurrences(of: "\r", with: " ")
-        norm = norm.replacingOccurrences(of: "\n", with: " ")
-
-        let tokenizer = NLTokenizer(unit: .sentence)
-        tokenizer.string = norm
-        var nlRanges: [NSRange] = []
-        tokenizer.enumerateTokens(in: norm.startIndex..<norm.endIndex) { range, _ in
-            let r = NSRange(range, in: norm)
-            if r.length > 0 { nlRanges.append(r) }
-            return true
-        }
-        if nlRanges.isEmpty {
+        // Pure regex sentence segmentation — more reliable than NLTokenizer for
+        // EPUB text where sentence boundaries follow standard rules.
+        //
+        // A sentence break occurs at either:
+        //   (A) sentence-ending punct [.?!] + optional closing quote (\p{Pf})
+        //       + horizontal whitespace + (uppercase letter or opening quote \p{Pi})
+        //   (B) a paragraph break (2+ consecutive newlines, any variant)
+        //
+        // All positions are in the ORIGINAL text's UTF-16 units, so they match
+        // the chunkBaseOffset + AVFoundation characterRange arithmetic exactly.
+        //
+        // \p{Pf} / \p{Pi} avoid embedding curly-quote literals in source.
+        let pattern = "[.?!]\\p{Pf}?[ \\t]+(?=[A-Z\\p{Pi}])" +
+                      "|[.?!]\\p{Pf}?[ \\t]*(?:\\r\\n|\\r|\\n)+" +
+                      "|(?:\\r\\n|\\r|\\n){2,}"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return [NSRange(location: 0, length: totalLength)]
         }
 
-        // NLTokenizer sometimes merges consecutive sentences (e.g. quoted dialogue).
-        // Post-split any token at sentence-ending punctuation + optional closing quote
-        // + whitespace + uppercase or opening quote.
-        // Use ICU Unicode property classes (\p{Pf}/\p{Pi}) so no curly-quote literals
-        // appear in source code.
-        let splitPattern = "[.?!]\\p{Pf}?\\s+(?=[A-Z\\p{Pi}])"
-        let splitRegex = try? NSRegularExpression(pattern: splitPattern)
-        var result: [NSRange] = []
-        for nr in nlRanges {
-            guard let regex = splitRegex, nr.length > 60 else { result.append(nr); continue }
-            let sub = ns.substring(with: nr)
-            var subBreaks: [NSRange] = [NSRange(location: 0, length: 0)]
-            regex.enumerateMatches(in: sub,
-                                   range: NSRange(location: 0, length: (sub as NSString).length)) { m, _, _ in
-                if let r = m?.range { subBreaks.append(NSRange(location: r.location + r.length, length: 0)) }
-            }
-            subBreaks.append(NSRange(location: (sub as NSString).length, length: 0))
-            for j in 0..<subBreaks.count - 1 {
-                let s2 = subBreaks[j].location, e2 = subBreaks[j + 1].location
-                guard e2 > s2 else { continue }
-                result.append(NSRange(location: nr.location + s2, length: e2 - s2))
-            }
+        var breakStarts: [Int] = [0]
+        regex.enumerateMatches(in: text,
+                               range: NSRange(location: 0, length: totalLength)) { m, _, _ in
+            guard let r = m?.range else { return }
+            // The next sentence begins right after the separator.
+            let next = r.location + r.length
+            if next < totalLength { breakStarts.append(next) }
         }
+        breakStarts.append(totalLength)
+
+        var result: [NSRange] = []
+        for i in 0..<breakStarts.count - 1 {
+            let s = breakStarts[i], e = breakStarts[i + 1]
+            guard e > s else { continue }
+            result.append(NSRange(location: s, length: e - s))
+        }
+        print("[TTS] sentenceRanges: \(result.count) sentences, first=\(result.first.map{"\($0.location)..\(NSMaxRange($0))"} ?? "nil")")
         return result.isEmpty ? [NSRange(location: 0, length: totalLength)] : result
     }
 
