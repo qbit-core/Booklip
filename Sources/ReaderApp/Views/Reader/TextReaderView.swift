@@ -427,7 +427,10 @@ struct NativeTextView: UIViewRepresentable {
         // In highlight mode allow text selection (so the user can pick a range);
         // otherwise selection stays off so taps drive paging.
         textView.isSelectable = highlightMode
-        textView.isScrollEnabled = true
+        // Paper mode: lock out finger-scroll; only tap zones and swipes page.
+        // Vertical/auto-scroll modes need free scrolling.
+        textView.isScrollEnabled = pageEffect != .paper
+        textView.alwaysBounceVertical = pageEffect != .paper
 
         // Only restyle when text/style/highlights actually change — never on the
         // frequent progress updates that scrolling produces.
