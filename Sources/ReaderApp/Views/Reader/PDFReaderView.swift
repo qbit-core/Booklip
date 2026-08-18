@@ -148,7 +148,11 @@ private func makePDFView() -> PDFView {
 }
 
 // Coordinator is shared across platforms
+#if os(iOS)
 class Coordinator: NSObject, UIGestureRecognizerDelegate {
+#else
+class Coordinator: NSObject {
+#endif
     @Binding var progress: Double
     var onTap: () -> Void = {}
     init(progress: Binding<Double>) { _progress = progress }
