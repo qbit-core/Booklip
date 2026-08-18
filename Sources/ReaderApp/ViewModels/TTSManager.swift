@@ -143,7 +143,8 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         var result: [NSRange] = []
 
         var breakRanges: [NSRange] = [NSRange(location: 0, length: 0)]
-        if let regex = try? NSRegularExpression(pattern: "\\n{2,}") {
+        // Match any 2+ consecutive newlines including \r\n (EPUB paragraph breaks).
+        if let regex = try? NSRegularExpression(pattern: "(?:\\r\\n|\\r|\\n){2,}") {
             regex.enumerateMatches(in: text,
                                    range: NSRange(location: 0, length: totalLength)) { m, _, _ in
                 if let r = m?.range { breakRanges.append(r) }
@@ -236,8 +237,13 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let range = chunkRanges[currentChunkIndex]
         // Store before speak() so willSpeakRangeOfSpeechString can map offsets.
         chunkBaseOffset = range.location
-        // Do NOT trim — trimming shifts characterRange offsets and breaks the mapping.
-        let text = fullText.substring(with: range)
+        // Normalize newlines to spaces before passing to AVSpeechUtterance.
+        // AVFoundation skips \r/\n in its internal character model, causing
+        // characterRange offsets to drift from our sentenceRanges. Each
+        // replacement is 1:1 UTF-16 so chunkBaseOffset + offset stays correct.
+        let raw = fullText.substring(with: range)
+        let text = raw.replacingOccurrences(of: "\r", with: " ")
+                      .replacingOccurrences(of: "\n", with: " ")
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = rate
