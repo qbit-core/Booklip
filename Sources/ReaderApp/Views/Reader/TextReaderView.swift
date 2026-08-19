@@ -299,14 +299,15 @@ struct NativeTextView: NSViewRepresentable {
         func updateHighlight(_ range: NSRange?, in textView: NSTextView, color: NSColor) {
             if let a = range, let b = lastHighlight, NSEqualRanges(a, b) { return }
             if range == nil && lastHighlight == nil { return }
-            guard let storage = textView.textStorage else { return }
-            if let old = lastHighlight, NSMaxRange(old) <= storage.length {
-                storage.removeAttribute(.backgroundColor, range: old)
-            }
+            guard let storage = textView.textStorage, storage.length > 0 else { return }
             lastHighlight = range
+            // Clear ALL background colors across the full document, then apply the
+            // new sentence. Removing only lastHighlight leaves stale color when the
+            // storage is rebuilt (e.g. window resize) between two highlight calls.
+            storage.removeAttribute(.backgroundColor,
+                                    range: NSRange(location: 0, length: storage.length))
             if let r = range, NSMaxRange(r) <= storage.length {
                 storage.addAttribute(.backgroundColor, value: color, range: r)
-                // Guard the scroll so boundsChanged doesn't fire during updateNSView.
                 isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
                 isScrollingProgrammatically = false
