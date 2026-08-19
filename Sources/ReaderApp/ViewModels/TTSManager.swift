@@ -209,7 +209,11 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             guard e > s else { continue }
             result.append(NSRange(location: s, length: e - s))
         }
-        print("[TTS] sentenceRanges: \(result.count) sentences, first=\(result.first.map{"\($0.location)..\(NSMaxRange($0))"} ?? "nil")")
+        print("[TTS] sentenceRanges: \(result.count) sentences")
+        for (i, r) in result.prefix(10).enumerated() {
+            let snippet = ns.substring(with: r).prefix(60).replacingOccurrences(of: "\n", with: "↵")
+            print("[TTS]   [\(i)] \(r.location)..\(NSMaxRange(r)): \"\(snippet)\"")
+        }
         return result.isEmpty ? [NSRange(location: 0, length: totalLength)] : result
     }
 
@@ -251,9 +255,11 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let globalPos = chunkBaseOffset + characterRange.location
         guard let sentence = sentenceRanges.first(where: {
             $0.location <= globalPos && globalPos < NSMaxRange($0)
-        }) else { return }
-        // Only dispatch when the sentence changes (avoids one main-actor round-trip
-        // per word within the same sentence).
+        }) else {
+            print("[TTS] willSpeak: NO sentence for globalPos=\(globalPos) (chunk base=\(chunkBaseOffset) + word=\(characterRange.location))")
+            return
+        }
+        print("[TTS] willSpeak: globalPos=\(globalPos) → sentence \(sentence.location)..\(NSMaxRange(sentence))")
         Task { @MainActor [self] in
             if let current = spokenRange, NSEqualRanges(current, sentence) { return }
             spokenRange = sentence
