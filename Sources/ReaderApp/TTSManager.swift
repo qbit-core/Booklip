@@ -169,56 +169,50 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Sentence segmentation
 
+    /// Splits `text` into sentence ranges using a direct character scan.
+    /// Handles regular spaces, tabs, and non-breaking spaces (U+00A0) after
+    /// sentence-ending punctuation, avoiding all regex-compilation edge cases.
     private func makeSentenceRanges(in text: String) -> [NSRange] {
         let ns = text as NSString
-        let totalLength = ns.length
+        let total = ns.length
+        guard total > 0 else { return [NSRange(location: 0, length: total)] }
 
-        // Sentence break: punct + optional closing quote + space + uppercase/opening-quote,
-        // OR punct + end-of-line, OR paragraph break (2+ newlines).
-        // Unicode close quotes: U+201D ", U+2019 '  Open quotes: U+201C ", U+2018 '
-        // Using \uXXXX escapes (ICU supported) instead of \p{Pi}/\p{Pf}.
-        let pattern = "[.?!][\\u201D\\u2019\"']?[ \\t]+(?=[A-Z\\u201C\\u2018\"'])" +
-                      "|[.?!][\\u201D\\u2019\"']?[ \\t]*(?:\\r\\n|\\r|\\n)+" +
-                      "|(?:\\r\\n|\\r|\\n){2,}"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            print("[TTS] sentence regex failed to compile — using fallback")
-            // Pattern failed to compile — treat each paragraph break as boundary only.
-            let fallback = "[\\r\\n]+"
-            guard let fb = try? NSRegularExpression(pattern: fallback) else {
-                return [NSRange(location: 0, length: totalLength)]
-            }
-            var fbStarts = [0]
-            fb.enumerateMatches(in: text, range: NSRange(location: 0, length: totalLength)) { m, _, _ in
-                guard let r = m?.range else { return }
-                let next = r.location + r.length
-                if next < totalLength { fbStarts.append(next) }
-            }
-            fbStarts.append(totalLength)
-            var fbResult: [NSRange] = []
-            for i in 0..<fbStarts.count - 1 {
-                let s = fbStarts[i], e = fbStarts[i + 1]
-                if e > s { fbResult.append(NSRange(location: s, length: e - s)) }
-            }
-            return fbResult.isEmpty ? [NSRange(location: 0, length: totalLength)] : fbResult
-        }
+        var starts: [Int] = [0]
+        var i = 0
+        while i < total {
+            let c = ns.character(at: i)
+            // Sentence-ending punctuation: . (0x2E) ? (0x3F) ! (0x21)
+            guard c == 0x2E || c == 0x3F || c == 0x21 else { i += 1; continue }
 
-        var breakStarts: [Int] = [0]
-        regex.enumerateMatches(in: text,
-                               range: NSRange(location: 0, length: totalLength)) { m, _, _ in
-            guard let r = m?.range else { return }
-            // The next sentence begins right after the separator.
-            let next = r.location + r.length
-            if next < totalLength { breakStarts.append(next) }
+            var j = i + 1
+            // Skip optional closing quote: " (U+201D) ' (U+2019) " (0x22) ' (0x27)
+            if j < total {
+                let q = ns.character(at: j)
+                if q == 0x201D || q == 0x2019 || q == 0x22 || q == 0x27 { j += 1 }
+            }
+            // Require 1+ whitespace: space (0x20), tab (0x09), NBSP (0x00A0)
+            let spaceStart = j
+            while j < total {
+                let sp = ns.character(at: j)
+                if sp == 0x20 || sp == 0x09 || sp == 0x00A0 { j += 1 } else { break }
+            }
+            guard j > spaceStart, j < total else { i += 1; continue }
+
+            // Next char: uppercase A-Z or opening quote " (U+201C) ' (U+2018) " '
+            let next = ns.character(at: j)
+            let isUpper  = next >= 0x41 && next <= 0x5A
+            let isOpenQ  = next == 0x201C || next == 0x2018 || next == 0x22 || next == 0x27
+            if isUpper || isOpenQ { starts.append(j) }
+            i += 1
         }
-        breakStarts.append(totalLength)
+        starts.append(total)
 
         var result: [NSRange] = []
-        for i in 0..<breakStarts.count - 1 {
-            let s = breakStarts[i], e = breakStarts[i + 1]
-            guard e > s else { continue }
-            result.append(NSRange(location: s, length: e - s))
+        for k in 0..<starts.count - 1 {
+            let s = starts[k], e = starts[k + 1]
+            if e > s { result.append(NSRange(location: s, length: e - s)) }
         }
-        return result.isEmpty ? [NSRange(location: 0, length: totalLength)] : result
+        return result.isEmpty ? [NSRange(location: 0, length: total)] : result
     }
 
     // MARK: - Playback
@@ -237,12 +231,6 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         // Using local coords means AVFoundation's characterRange.location maps
         // directly — no global offset arithmetic needed for the lookup.
         chunkSentenceRanges = makeSentenceRanges(in: raw)
-        let rawNS = raw as NSString
-        print("[TTS] chunk[\(currentChunkIndex)] base=\(range.location) sentences=\(chunkSentenceRanges.count)")
-        for (i, r) in chunkSentenceRanges.prefix(15).enumerated() {
-            let snip = rawNS.substring(with: r).prefix(60).replacingOccurrences(of: "\n", with: "↵")
-            print("[TTS]   s[\(i)] local \(r.location)..\(NSMaxRange(r)): \"\(snip)\"")
-        }
         // Normalize newlines to spaces 1:1 so AVFoundation characterRange positions
         // stay aligned with the original local coords.
         let text = raw.replacingOccurrences(of: "\r", with: " ")
@@ -266,14 +254,9 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let localPos = characterRange.location
         guard let localSentence = chunkSentenceRanges.first(where: {
             $0.location <= localPos && localPos < NSMaxRange($0)
-        }) else {
-            print("[TTS] willSpeak: NO sentence for localPos=\(localPos)")
-            return
-        }
-        // Convert to global coords for the highlight.
+        }) else { return }
         let globalSentence = NSRange(location: chunkBaseOffset + localSentence.location,
                                      length: localSentence.length)
-        print("[TTS] willSpeak: local=\(localPos) → s[\(chunkSentenceRanges.firstIndex(where: { NSEqualRanges($0, localSentence) }) ?? -1)] global \(globalSentence.location)..\(NSMaxRange(globalSentence))")
         Task { @MainActor [self] in
             if let current = spokenRange, NSEqualRanges(current, globalSentence) { return }
             spokenRange = globalSentence
