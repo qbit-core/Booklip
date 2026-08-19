@@ -237,6 +237,12 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         // Using local coords means AVFoundation's characterRange.location maps
         // directly — no global offset arithmetic needed for the lookup.
         chunkSentenceRanges = makeSentenceRanges(in: raw)
+        let rawNS = raw as NSString
+        print("[TTS] chunk[\(currentChunkIndex)] base=\(range.location) sentences=\(chunkSentenceRanges.count)")
+        for (i, r) in chunkSentenceRanges.prefix(15).enumerated() {
+            let snip = rawNS.substring(with: r).prefix(60).replacingOccurrences(of: "\n", with: "↵")
+            print("[TTS]   s[\(i)] local \(r.location)..\(NSMaxRange(r)): \"\(snip)\"")
+        }
         // Normalize newlines to spaces 1:1 so AVFoundation characterRange positions
         // stay aligned with the original local coords.
         let text = raw.replacingOccurrences(of: "\r", with: " ")
@@ -260,10 +266,14 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let localPos = characterRange.location
         guard let localSentence = chunkSentenceRanges.first(where: {
             $0.location <= localPos && localPos < NSMaxRange($0)
-        }) else { return }
+        }) else {
+            print("[TTS] willSpeak: NO sentence for localPos=\(localPos)")
+            return
+        }
         // Convert to global coords for the highlight.
         let globalSentence = NSRange(location: chunkBaseOffset + localSentence.location,
                                      length: localSentence.length)
+        print("[TTS] willSpeak: local=\(localPos) → s[\(chunkSentenceRanges.firstIndex(where: { NSEqualRanges($0, localSentence) }) ?? -1)] global \(globalSentence.location)..\(NSMaxRange(globalSentence))")
         Task { @MainActor [self] in
             if let current = spokenRange, NSEqualRanges(current, globalSentence) { return }
             spokenRange = globalSentence
