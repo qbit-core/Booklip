@@ -173,23 +173,33 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let ns = text as NSString
         let totalLength = ns.length
 
-        // Pure regex sentence segmentation — more reliable than NLTokenizer for
-        // EPUB text where sentence boundaries follow standard rules.
-        //
-        // A sentence break occurs at either:
-        //   (A) sentence-ending punct [.?!] + optional closing quote (\p{Pf})
-        //       + horizontal whitespace + (uppercase letter or opening quote \p{Pi})
-        //   (B) a paragraph break (2+ consecutive newlines, any variant)
-        //
-        // All positions are in the ORIGINAL text's UTF-16 units, so they match
-        // the chunkBaseOffset + AVFoundation characterRange arithmetic exactly.
-        //
-        // \p{Pf} / \p{Pi} avoid embedding curly-quote literals in source.
-        let pattern = "[.?!]\\p{Pf}?[ \\t]+(?=[A-Z\\p{Pi}])" +
-                      "|[.?!]\\p{Pf}?[ \\t]*(?:\\r\\n|\\r|\\n)+" +
+        // Sentence break: punct + optional closing quote + space + uppercase/opening-quote,
+        // OR punct + end-of-line, OR paragraph break (2+ newlines).
+        // Unicode close quotes: U+201D ", U+2019 '  Open quotes: U+201C ", U+2018 '
+        // Using \uXXXX escapes (ICU supported) instead of \p{Pi}/\p{Pf}.
+        let pattern = "[.?!][\\u201D\\u2019\"']?[ \\t]+(?=[A-Z\\u201C\\u2018\"'])" +
+                      "|[.?!][\\u201D\\u2019\"']?[ \\t]*(?:\\r\\n|\\r|\\n)+" +
                       "|(?:\\r\\n|\\r|\\n){2,}"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return [NSRange(location: 0, length: totalLength)]
+            print("[TTS] sentence regex failed to compile — using fallback")
+            // Pattern failed to compile — treat each paragraph break as boundary only.
+            let fallback = "[\\r\\n]+"
+            guard let fb = try? NSRegularExpression(pattern: fallback) else {
+                return [NSRange(location: 0, length: totalLength)]
+            }
+            var fbStarts = [0]
+            fb.enumerateMatches(in: text, range: NSRange(location: 0, length: totalLength)) { m, _, _ in
+                guard let r = m?.range else { return }
+                let next = r.location + r.length
+                if next < totalLength { fbStarts.append(next) }
+            }
+            fbStarts.append(totalLength)
+            var fbResult: [NSRange] = []
+            for i in 0..<fbStarts.count - 1 {
+                let s = fbStarts[i], e = fbStarts[i + 1]
+                if e > s { fbResult.append(NSRange(location: s, length: e - s)) }
+            }
+            return fbResult.isEmpty ? [NSRange(location: 0, length: totalLength)] : fbResult
         }
 
         var breakStarts: [Int] = [0]
