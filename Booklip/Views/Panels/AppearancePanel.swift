@@ -54,17 +54,6 @@ struct AppearancePanel: View {
                         .pickerStyle(.segmented)
                     }
 
-#if os(macOS)
-                    // Side-by-side double page layout (macOS only)
-                    PanelSection(title: "Layout") {
-                        Picker("Layout", selection: $settings.pageColumns) {
-                            Text("Single").tag(1)
-                            Text("Double").tag(2)
-                        }
-                        .pickerStyle(.segmented)
-                    }
-#endif
-
                     // Use the EPUB's embedded font (fixes font-obfuscated books)
                     PanelSection(title: "EPUB") {
                         Toggle("Use book's original font", isOn: $settings.useEmbeddedFont)

@@ -5,10 +5,18 @@ struct PDFReaderView: View {
     let document: PDFDocument?
     var background: Color = Color(white: 1)
     @Binding var progress: Double
-    var pageColumns: Int = 1
+    @Binding var showBars: Bool
+    @Binding var pageNavigationDirection: Int
+    var searchQuery: String = ""
 
     var body: some View {
-        PDFKitView(document: document, background: background, progress: $progress, pageColumns: pageColumns)
+        PDFKitView(
+            document: document,
+            background: background,
+            progress: $progress,
+            pageNavigationDirection: $pageNavigationDirection,
+            onTap: { showBars.toggle() }
+        )
     }
 }
 
@@ -21,7 +29,8 @@ private struct PDFKitView: UIViewRepresentable {
     let document: PDFDocument?
     let background: Color
     @Binding var progress: Double
-    var pageColumns: Int = 1
+    @Binding var pageNavigationDirection: Int
+    var onTap: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress) }
 
@@ -33,12 +42,35 @@ private struct PDFKitView: UIViewRepresentable {
             name: .PDFViewPageChanged,
             object: view
         )
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleTap(_:)))
+        tap.delegate = context.coordinator
+        view.addGestureRecognizer(tap)
+        context.coordinator.onTap = onTap
         return view
     }
 
     func updateUIView(_ uiView: PDFView, context: Context) {
         if uiView.document == nil { uiView.document = document }
         uiView.backgroundColor = UIColor(background)
+        context.coordinator.onTap = onTap
+
+        let dir = pageNavigationDirection
+        if dir != 0 {
+            if dir > 0 { uiView.goToNextPage(nil) }
+            else       { uiView.goToPreviousPage(nil) }
+            let binding = $pageNavigationDirection
+            DispatchQueue.main.async { binding.wrappedValue = 0 }
+        } else if let doc = uiView.document, let currentPage = uiView.currentPage {
+            let pageCount = max(doc.pageCount - 1, 1)
+            let currentProgress = Double(doc.index(for: currentPage)) / Double(pageCount)
+            if abs(progress - currentProgress) > 0.01 {
+                let target = Int(round(progress * Double(pageCount)))
+                if let page = doc.page(at: min(target, doc.pageCount - 1)) {
+                    uiView.go(to: page)
+                }
+            }
+        }
     }
 
     static func dismantleUIView(_ uiView: PDFView, coordinator: Coordinator) {
@@ -55,7 +87,8 @@ private struct PDFKitView: NSViewRepresentable {
     let document: PDFDocument?
     let background: Color
     @Binding var progress: Double
-    var pageColumns: Int = 1
+    @Binding var pageNavigationDirection: Int
+    var onTap: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(progress: $progress) }
 
@@ -67,15 +100,35 @@ private struct PDFKitView: NSViewRepresentable {
             name: .PDFViewPageChanged,
             object: view
         )
+        let click = NSClickGestureRecognizer(target: context.coordinator,
+                                             action: #selector(Coordinator.handleTap(_:)))
+        view.addGestureRecognizer(click)
+        context.coordinator.onTap = onTap
         return view
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
         if nsView.document == nil { nsView.document = document }
         nsView.backgroundColor = NSColor(background)
-        // Switch between single and two-up layout based on the appearance setting.
-        let mode: PDFDisplayMode = pageColumns == 2 ? .twoUpContinuous : .singlePageContinuous
-        if nsView.displayMode != mode { nsView.displayMode = mode }
+        if nsView.displayMode != .singlePageContinuous { nsView.displayMode = .singlePageContinuous }
+        context.coordinator.onTap = onTap
+
+        let dir = pageNavigationDirection
+        if dir != 0 {
+            if dir > 0 { nsView.goToNextPage(nil) }
+            else       { nsView.goToPreviousPage(nil) }
+            let binding = $pageNavigationDirection
+            DispatchQueue.main.async { binding.wrappedValue = 0 }
+        } else if let doc = nsView.document, let currentPage = nsView.currentPage {
+            let pageCount = max(doc.pageCount - 1, 1)
+            let currentProgress = Double(doc.index(for: currentPage)) / Double(pageCount)
+            if abs(progress - currentProgress) > 0.01 {
+                let target = Int(round(progress * Double(pageCount)))
+                if let page = doc.page(at: min(target, doc.pageCount - 1)) {
+                    nsView.go(to: page)
+                }
+            }
+        }
     }
 
     static func dismantleNSView(_ nsView: PDFView, coordinator: Coordinator) {
@@ -97,7 +150,10 @@ private func makePDFView() -> PDFView {
 // Coordinator is shared across platforms
 class Coordinator: NSObject {
     @Binding var progress: Double
+    var onTap: () -> Void = {}
     init(progress: Binding<Double>) { _progress = progress }
+
+    @objc func handleTap(_ gesture: Any) { onTap() }
 
     @objc func pageChanged(_ notification: Notification) {
         guard let view = notification.object as? PDFView,
@@ -111,3 +167,7 @@ class Coordinator: NSObject {
         DispatchQueue.main.async { [weak self] in self?.progress = newProgress }
     }
 }
+
+#if os(iOS)
+extension Coordinator: UIGestureRecognizerDelegate {}
+#endif

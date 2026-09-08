@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import NaturalLanguage
 import SwiftUI
 
 // AVSpeechSynthesizer is designed to be driven from the main thread.
@@ -13,8 +14,8 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var rate: Float = AVSpeechUtteranceDefaultSpeechRate
     @Published var pitch: Float = 1.0
 
-    /// Character range (UTF-16, in the full document text) currently being spoken.
-    /// nil when stopped. Views observe this to highlight & auto-scroll.
+    /// Full sentence range (UTF-16, in the full document text) currently being spoken.
+    /// nil when stopped. Views observe this to highlight the sentence & auto-scroll.
     @Published var spokenRange: NSRange?
 
     /// Active sleep-timer duration in minutes (nil = off).
@@ -23,25 +24,20 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     private let synthesizer = AVSpeechSynthesizer()
 
-    // Chunked playback state — each chunk is an exact substring of `fullText`
-    // so its global UTF-16 offset is known precisely.
     private var fullText: NSString = ""
+    /// Paragraph-level chunks — each becomes one AVSpeechUtterance.
     private var chunkRanges: [NSRange] = []
     private var currentChunkIndex = 0
+    /// Global UTF-16 offset of the first character of the current utterance.
+    /// nonisolated(unsafe): set on MainActor before synthesizer.speak(); read-only in delegate callbacks.
+    nonisolated(unsafe) private var chunkBaseOffset = 0
+    /// Sentence ranges within the CURRENT chunk (local / 0-based coords relative to chunkBaseOffset).
+    /// nonisolated(unsafe): written on MainActor before synthesizer.speak(); read-only in delegate callbacks.
+    nonisolated(unsafe) private var chunkSentenceRanges: [NSRange] = []
 
-    private let maxChunkSize = 500
-
-    var availableVoices: [AVSpeechSynthesisVoice] {
-        AVSpeechSynthesisVoice.speechVoices()
-            .filter { voice in
-                let lang = voice.language.lowercased()
-                let name = voice.name.lowercased()
-                return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
-                    (name.contains("yuna") || name.contains("eddy") ||
-                     name.contains("flo") || name.contains("samantha"))
-            }
-            .sorted { $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language }
-    }
+    // Cached once — speechVoices() hits an AVFoundation internal decoder on
+    // repeated calls which logs a DecodingError and can return an empty list.
+    @Published private(set) var availableVoices: [AVSpeechSynthesisVoice] = []
 
     var selectedVoice: AVSpeechSynthesisVoice? {
         availableVoices.first { $0.identifier == selectedVoiceID } ?? availableVoices.first
@@ -50,10 +46,31 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synthesizer.delegate = self
-        selectedVoiceID = availableVoices.first?.identifier ?? ""
 #if os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
 #endif
+        refreshVoices()
+    }
+
+    func refreshVoices() {
+        let all = AVSpeechSynthesisVoice.speechVoices()
+        // Prefer high-quality named voices; fall back to any en-US / ko-KR voice.
+        let preferred = all.filter { voice in
+            let lang = voice.language.lowercased()
+            let name = voice.name.lowercased()
+            return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
+                (name.contains("yuna") || name.contains("eddy") ||
+                 name.contains("flo") || name.contains("samantha"))
+        }
+        let voices = preferred.isEmpty
+            ? all.filter { $0.language.lowercased().hasPrefix("en-us") || $0.language.lowercased().hasPrefix("ko-kr") }
+            : preferred
+        availableVoices = voices.sorted {
+            $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
+        }
+        if selectedVoiceID.isEmpty || !availableVoices.contains(where: { $0.identifier == selectedVoiceID }) {
+            selectedVoiceID = availableVoices.first?.identifier ?? ""
+        }
     }
 
     // MARK: - Public API
@@ -61,8 +78,9 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     func speak(text: String, from offset: Int = 0) {
         synthesizer.stopSpeaking(at: .immediate)
         fullText = text as NSString
-        chunkRanges = makeChunkRanges(in: fullText, startingAt: offset)
-        currentChunkIndex = 0
+        chunkRanges = makeParagraphChunks(in: text)
+        // Start at the chunk that contains or starts at/after offset.
+        currentChunkIndex = chunkRanges.firstIndex { NSMaxRange($0) > offset } ?? 0
         speakCurrentChunk()
     }
 
@@ -79,8 +97,10 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
+        chunkSentenceRanges = []
         chunkRanges = []
         currentChunkIndex = 0
+        chunkBaseOffset = 0
         isPlaying = false
         spokenRange = nil
     }
@@ -111,27 +131,91 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    // MARK: - Chunking (exact substrings → preserves global offsets)
+    // MARK: - Chunking
 
-    private func makeChunkRanges(in ns: NSString, startingAt start: Int) -> [NSRange] {
-        let length = ns.length
-        var ranges: [NSRange] = []
-        var i = max(0, min(start, length))
-        while i < length {
-            var end = min(i + maxChunkSize, length)
-            if end < length {
-                // Prefer to break at a whitespace/newline in the second half of the window
-                let window = NSRange(location: i, length: end - i)
-                let r = ns.rangeOfCharacter(from: .whitespacesAndNewlines, options: .backwards, range: window)
-                if r.location != NSNotFound && r.location > i + maxChunkSize / 2 {
-                    end = r.location + r.length
-                }
+    /// Splits text at paragraph breaks (2+ newlines). Each paragraph becomes one utterance
+    /// so there are no inter-utterance gaps. willSpeakRangeOfSpeechString fires per-word
+    /// inside each chunk, giving exact synchronization.
+    private func makeParagraphChunks(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        let totalLength = ns.length
+        var result: [NSRange] = []
+
+        var breakRanges: [NSRange] = [NSRange(location: 0, length: 0)]
+        // Match any 2+ consecutive newlines including \r\n (EPUB paragraph breaks).
+        if let regex = try? NSRegularExpression(pattern: "(?:\\r\\n|\\r|\\n){2,}") {
+            regex.enumerateMatches(in: text,
+                                   range: NSRange(location: 0, length: totalLength)) { m, _, _ in
+                if let r = m?.range { breakRanges.append(r) }
             }
-            ranges.append(NSRange(location: i, length: end - i))
-            i = end
         }
-        return ranges
+        breakRanges.append(NSRange(location: totalLength, length: 0))
+
+        for i in 0..<breakRanges.count - 1 {
+            let start = NSMaxRange(breakRanges[i])
+            let end   = breakRanges[i + 1].location
+            guard end > start else { continue }
+            let range = NSRange(location: start, length: end - start)
+            let paraText = ns.substring(with: range)
+            guard !paraText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            result.append(range)
+        }
+
+        if result.isEmpty, !text.isEmpty {
+            result.append(NSRange(location: 0, length: totalLength))
+        }
+        return result
     }
+
+    // MARK: - Sentence segmentation
+
+    /// Splits `text` into sentence ranges using a direct character scan.
+    /// Handles regular spaces, tabs, and non-breaking spaces (U+00A0) after
+    /// sentence-ending punctuation, avoiding all regex-compilation edge cases.
+    private func makeSentenceRanges(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        let total = ns.length
+        guard total > 0 else { return [NSRange(location: 0, length: total)] }
+
+        var starts: [Int] = [0]
+        var i = 0
+        while i < total {
+            let c = ns.character(at: i)
+            // Sentence-ending punctuation: . (0x2E) ? (0x3F) ! (0x21)
+            guard c == 0x2E || c == 0x3F || c == 0x21 else { i += 1; continue }
+
+            var j = i + 1
+            // Skip optional closing quote: " (U+201D) ' (U+2019) " (0x22) ' (0x27)
+            if j < total {
+                let q = ns.character(at: j)
+                if q == 0x201D || q == 0x2019 || q == 0x22 || q == 0x27 { j += 1 }
+            }
+            // Require 1+ whitespace: space (0x20), tab (0x09), NBSP (0x00A0)
+            let spaceStart = j
+            while j < total {
+                let sp = ns.character(at: j)
+                if sp == 0x20 || sp == 0x09 || sp == 0x00A0 { j += 1 } else { break }
+            }
+            guard j > spaceStart, j < total else { i += 1; continue }
+
+            // Next char: uppercase A-Z or opening quote " (U+201C) ' (U+2018) " '
+            let next = ns.character(at: j)
+            let isUpper  = next >= 0x41 && next <= 0x5A
+            let isOpenQ  = next == 0x201C || next == 0x2018 || next == 0x22 || next == 0x27
+            if isUpper || isOpenQ { starts.append(j) }
+            i += 1
+        }
+        starts.append(total)
+
+        var result: [NSRange] = []
+        for k in 0..<starts.count - 1 {
+            let s = starts[k], e = starts[k + 1]
+            if e > s { result.append(NSRange(location: s, length: e - s)) }
+        }
+        return result.isEmpty ? [NSRange(location: 0, length: total)] : result
+    }
+
+    // MARK: - Playback
 
     private func speakCurrentChunk() {
         guard currentChunkIndex < chunkRanges.count else {
@@ -139,8 +223,19 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             spokenRange = nil
             return
         }
-        let chunk = fullText.substring(with: chunkRanges[currentChunkIndex])
-        let utterance = AVSpeechUtterance(string: chunk)
+        let range = chunkRanges[currentChunkIndex]
+        // Store before speak() so willSpeakRangeOfSpeechString can map offsets.
+        chunkBaseOffset = range.location
+        let raw = fullText.substring(with: range)
+        // Compute sentence ranges in LOCAL (0-based) coords of this chunk.
+        // Using local coords means AVFoundation's characterRange.location maps
+        // directly — no global offset arithmetic needed for the lookup.
+        chunkSentenceRanges = makeSentenceRanges(in: raw)
+        // Normalize newlines to spaces 1:1 so AVFoundation characterRange positions
+        // stay aligned with the original local coords.
+        let text = raw.replacingOccurrences(of: "\r", with: " ")
+                      .replacingOccurrences(of: "\n", with: " ")
+        let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = rate
         utterance.pitchMultiplier = pitch
@@ -153,10 +248,18 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        willSpeakRangeOfSpeechString characterRange: NSRange,
                                        utterance: AVSpeechUtterance) {
+        // Look up the sentence in LOCAL (chunk-relative) coords.
+        // chunkBaseOffset and chunkSentenceRanges are nonisolated(unsafe):
+        // written on MainActor before synthesizer.speak(), so no concurrent writes.
+        let localPos = characterRange.location
+        guard let localSentence = chunkSentenceRanges.first(where: {
+            $0.location <= localPos && localPos < NSMaxRange($0)
+        }) else { return }
+        let globalSentence = NSRange(location: chunkBaseOffset + localSentence.location,
+                                     length: localSentence.length)
         Task { @MainActor [self] in
-            guard currentChunkIndex < chunkRanges.count else { return }
-            let base = chunkRanges[currentChunkIndex].location
-            spokenRange = NSRange(location: base + characterRange.location, length: characterRange.length)
+            if let current = spokenRange, NSEqualRanges(current, globalSentence) { return }
+            spokenRange = globalSentence
         }
     }
 

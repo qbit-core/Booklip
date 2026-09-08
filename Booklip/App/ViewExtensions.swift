@@ -52,10 +52,72 @@ extension ToolbarItemPlacement {
 #if os(macOS)
 import AppKit
 
-// Global set of item IDs that currently have an open reader window.
-// Prevents two Library windows from spawning duplicate reader windows for the
-// same book when both observe the same selectedBook binding change.
 private var _openReaderItemIDs: Set<AnyHashable> = []
+private var _retainedWindows: [ObjectIdentifier: NSWindow] = [:]
+
+private func collectTextStorages(in view: NSView, into arr: inout [NSTextStorage]) {
+    for sub in view.subviews { collectTextStorages(in: sub, into: &arr) }
+    if let tv = view as? NSTextView, let storage = tv.textStorage {
+        arr.append(storage)
+    }
+}
+
+// Final stage of window teardown, called after NSWindow.close() has fully returned.
+//
+// Two AppKit hazards make teardown non-trivial:
+//
+// Hazard A — EXC_BAD_ACCESS at __CFRunLoopPerCalloutARPEnd:
+//   close() autoreleases AppKit-internal bookkeeping objects (CA transactions,
+//   window-ordering state) into the CFRunLoop per-callout pool.  Those objects
+//   hold unsafe_unretained back-refs into the view hierarchy.  If we nil
+//   contentViewController *during* windowWillClose (which fires mid-close()), we
+//   free the view hierarchy while those objects still point at it.  The outer pool
+//   drains after close() returns → EXC_BAD_ACCESS.
+//   Fix: windowWillClose defers this function to DispatchQueue.main.async.
+//
+// Hazard B — NSInvalidArgumentException "-[NSView contentViewController]":
+//   With isReleasedWhenClosed = true (the default), close() calls [window release]
+//   internally.  Even though our strong ref keeps the window alive, AppKit's
+//   internal "being released" path replaces contentViewController with an opaque
+//   proxy object.  Accessing window.contentViewController after close() then hits
+//   an object that doesn't understand that selector.
+//   Fix: set isReleasedWhenClosed = false so close() only hides the window.
+//   We collect hostingVC and textStorages BEFORE close() is called, so this
+//   function never needs to touch window.contentViewController at all.
+//
+// Parameters are pre-collected before close() executes.
+private func teardownWindowContent(
+    window: NSWindow,
+    hostingVC: NSViewController?,
+    textStorages: [NSTextStorage]
+) {
+    let key = ObjectIdentifier(window)
+    var textStorages = textStorages
+
+    // Nil contentViewController in an explicit pool. The hosting controller's
+    // retain count drops to zero here, triggering NSHostingController →
+    // NSTextView → NSLayoutManager dealloc while `hostingVC` (parameter, alive
+    // for the entire function) and `textStorages` keep NSTextStorage live through
+    // NSLayoutManager.dealloc's autorelease of glyph-cache objects.
+    autoreleasepool {
+        window.contentViewController = nil
+        _ = hostingVC  // keep parameter alive through pool drain
+    }
+
+    // Release NSTextStorage now that NSLayoutManager is gone.
+    autoreleasepool {
+        textStorages.removeAll()
+    }
+
+    // Keep the now-empty window alive one more main-queue hop to outlast any
+    // residual ARP drain, then release it trivially.
+    _retainedWindows[key] = window
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        autoreleasepool {
+            _ = _retainedWindows.removeValue(forKey: key)
+        }
+    }
+}
 
 /// Presents content in a standalone, freely movable NSWindow instead of an
 /// attached sheet. Each distinct item ID gets its own window; closing the
@@ -72,13 +134,13 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         if let current = item {
             let newId = AnyHashable(current.id)
             guard coord.currentItemId != newId else { return }
-            coord.currentItemId = newId
             let binding = $item
             coord.open(
                 content: AnyView(makeContent(current)),
                 itemId: newId,
                 onClose: { DispatchQueue.main.async { binding.wrappedValue = nil } }
             )
+            coord.currentItemId = newId
         } else {
             coord.closeWindow()
         }
@@ -90,8 +152,6 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         private var onClose: (() -> Void)?
 
         func open(content: AnyView, itemId: AnyHashable, onClose: @escaping () -> Void) {
-            // If another Library window already opened a reader for this book,
-            // just bring that window forward rather than creating a second one.
             if _openReaderItemIDs.contains(itemId) {
                 for win in NSApplication.shared.windows
                 where win.titlebarAppearsTransparent && win.isVisible {
@@ -105,9 +165,6 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
             self.onClose = onClose
 
             let hosting = NSHostingController(rootView: content)
-            // NSScrollView has no intrinsic size, so the hosting controller's
-            // preferred content size is near-zero. Disable auto-sizing so the
-            // window keeps the size we specify rather than collapsing on show.
             hosting.sizingOptions = []
             let win = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 700, height: 900),
@@ -116,19 +173,15 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
                 defer: false
             )
             win.contentViewController = hosting
-            // contentViewController= may resize the window if preferredContentSize
-            // is non-zero; override to guarantee our desired initial size.
             win.setContentSize(NSSize(width: 700, height: 900))
             win.titlebarAppearsTransparent = true
             win.titleVisibility = .hidden
             win.minSize = NSSize(width: 480, height: 640)
-            // Disable the window open/close animation so AppKit never creates
-            // _NSWindowTransformAnimation. That animation stores unsafe_unretained
-            // references into the window's view hierarchy; our windowWillClose handler
-            // releases NSHostingController synchronously while the animation object
-            // is still autoreleased, causing objc_release on a freed pointer when
-            // the autorelease pool drains during the next CA transaction commit.
             win.animationBehavior = .none
+            // Prevent close() from calling [window release] internally, which
+            // corrupts contentViewController with an opaque proxy object even when
+            // we still hold a strong reference.  We release the window ourselves.
+            win.isReleasedWhenClosed = false
             win.delegate = self
             win.center()
             win.makeKeyAndOrderFront(nil)
@@ -136,68 +189,41 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
         }
 
         func closeWindow() {
-            window?.delegate = nil   // stop the delegate callback firing for our own close
-            window?.close()
-            if let contentView = window?.contentView {
-                clearNSTextViews(in: contentView)
+            guard let win = window else { return }
+            win.delegate = nil
+            // Collect refs BEFORE close() so contentViewController is still valid.
+            let hostingVC = win.contentViewController
+            var textStorages: [NSTextStorage] = []
+            if let cv = hostingVC?.view {
+                collectTextStorages(in: cv, into: &textStorages)
             }
-            let deferred = window
+            win.close()
             window = nil
             if let id = currentItemId { _openReaderItemIDs.remove(id) }
             currentItemId = nil
-            deferWindowRelease(deferred)
+            // close() has returned; safe to tear down synchronously.
+            teardownWindowContent(window: win, hostingVC: hostingVC, textStorages: textStorages)
         }
 
         func windowWillClose(_ notification: Notification) {
+            guard let win = window else { return }
             if let id = currentItemId { _openReaderItemIDs.remove(id) }
-            if let contentView = window?.contentView {
-                clearNSTextViews(in: contentView)
+            // Collect refs NOW while the view hierarchy is intact (mid-close is fine
+            // for reads; it's writes/nils that cause the CFRunLoop-pool hazard).
+            let hostingVC = win.contentViewController
+            var textStorages: [NSTextStorage] = []
+            if let cv = hostingVC?.view {
+                collectTextStorages(in: cv, into: &textStorages)
             }
-            let deferred = window
             window = nil
             currentItemId = nil
             onClose?()
             onClose = nil
-            deferWindowRelease(deferred)
-        }
-
-        // Defer NSWindow dealloc past the NSApplication autorelease pool drain.
-        //
-        // NSLayoutManager autoreleases references to its glyph/line-fragment arrays
-        // via internal accessor methods. If the window (and thus NSLayoutManager) is
-        // freed before the pool drains, NSLayoutManager.dealloc frees those objects
-        // while the pool still holds a reference → objc_release on freed memory
-        // (EXC_BAD_ACCESS in NSArrayM.dealloc / AutoreleasePoolPage::releaseUntil).
-        //
-        // Two GCD hops are required because CFRunLoop calls __CFRunLoopDoBlocks once
-        // more AFTER source0 (AppKit event processing) but BEFORE kCFRunLoopBeforeWaiting
-        // (pool drain). A single async fires in that same pass; the outer block fires
-        // there, schedules the inner block, and the inner block fires only in the NEXT
-        // __CFRunLoopDoBlocks sweep — which is after the pool drain. This holds for
-        // both the user-close path (windowWillClose, called from source0) and the
-        // programmatic path (closeWindow, called from a SwiftUI GCD update block).
-        //
-        // Empty closure body: "_ = deferred" gives ARC an in-body use-point and the
-        // optimizer moves the release there, then block_destroy_helper releases again
-        // → double-free. With no body reference the sole release is in the destroy helper.
-        private func deferWindowRelease(_ window: NSWindow?) {
+            // Defer teardown to after close() fully unwinds so the CFRunLoop
+            // per-callout pool drains before we nil the view hierarchy.
+            // Captures win/hostingVC/textStorages by value — no reference to self.
             DispatchQueue.main.async {
-                DispatchQueue.main.async {
-                    // withExtendedLifetime creates a formal use-point for `window`,
-                    // suppressing the "never used" compiler warning and preventing
-                    // the ARC optimizer from moving the release into the closure body
-                    // (which would cause a double-free in block_destroy_helper).
-                    withExtendedLifetime(window) {}
-                }
-            }
-        }
-
-        private func clearNSTextViews(in view: NSView) {
-            for sub in view.subviews { clearNSTextViews(in: sub) }
-            if let tv = view as? NSTextView {
-                autoreleasepool {
-                    tv.textStorage?.setAttributedString(NSAttributedString(string: ""))
-                }
+                teardownWindowContent(window: win, hostingVC: hostingVC, textStorages: textStorages)
             }
         }
     }

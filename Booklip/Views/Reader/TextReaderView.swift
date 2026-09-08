@@ -4,15 +4,14 @@ import Combine
 struct TextReaderView: View {
     @ObservedObject var vm: ReaderViewModel
     @ObservedObject var settings: ReadingSettings
-    @ObservedObject var tts: TTSManager
     @Binding var showBars: Bool
-    @Binding var autoScrolling: Bool
-    @Binding var highlightMode: Bool
-    @StateObject private var pageLayout = PageStepState()
-    // Reference-type channel for scroll-position and tap events from the primary
-    // coordinator. The coordinator holds only a weak reference to this object, so it
-    // can never crash — if the view is dismantled before the coordinator is released
-    // (via AppKit's gesture-recognizer retain chain), writes just become no-ops.
+    @ObservedObject var tts: TTSManager
+    @Binding var pageNavigationDirection: Int
+    var searchQuery: String = ""
+    var searchResultIndex: Int = 0
+    @Binding var selectedRange: NSRange?
+    @State private var autoScrolling = false
+    @State private var highlightMode = false
 #if os(macOS)
     @StateObject private var eventChannel = TextViewEventChannel()
 #endif
@@ -23,32 +22,18 @@ struct TextReaderView: View {
 
     var body: some View {
 #if os(macOS)
-        Group {
-            if settings.pageColumns == 2 {
-                HStack(spacing: 0) {
-                    nativeTextView(progress: vm.progress, isPrimary: true)
-                    Divider()
-                    nativeTextView(progress: min(vm.progress + pageLayout.value, 1.0),
-                                   isPrimary: false)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                nativeTextView(progress: vm.progress, isPrimary: true)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        // Propagate coordinator scroll events → model. .dropFirst() skips the
-        // initial zero emission so we never override a book's saved progress.
-        .onReceive(eventChannel.$scrollProgress.dropFirst()) { vm.progress = $0 }
-        .onReceive(eventChannel.$tapCount.dropFirst()) { _ in showBars.toggle() }
+        nativeTextView(progress: vm.progress)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onReceive(eventChannel.$scrollProgress.dropFirst()) { vm.progress = $0 }
+            .onReceive(eventChannel.$tapCount.dropFirst()) { _ in showBars.toggle() }
 #else
-        nativeTextView(progress: $vm.progress, isPrimary: true)
+        nativeTextView(progress: $vm.progress)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 #endif
     }
 
 #if os(macOS)
-    private func nativeTextView(progress: Double, isPrimary: Bool) -> NativeTextView {
+    private func nativeTextView(progress: Double) -> NativeTextView {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
@@ -65,17 +50,13 @@ struct TextReaderView: View {
             },
             progress: progress,
             spokenRange: tts.spokenRange,
-            eventChannel: isPrimary ? eventChannel : nil,
-            pageColumns: settings.pageColumns,
-            // Both columns receive pageLayout: secondary reads .scrollable to
-            // position itself; primary is the only one that writes it (guarded
-            // by isPrimary inside updatePageStep).
-            pageLayout: pageLayout,
-            isPrimary: isPrimary
+            searchQuery: searchQuery,
+            searchResultIndex: searchResultIndex,
+            eventChannel: eventChannel
         )
     }
 #else
-    private func nativeTextView(progress: Binding<Double>, isPrimary: Bool) -> NativeTextView {
+    private func nativeTextView(progress: Binding<Double>) -> NativeTextView {
         NativeTextView(
             text: vm.book.format == .markdown ? nil : vm.plainText,
             attributedText: vm.book.format == .markdown ? vm.attributedText : nil,
@@ -92,31 +73,12 @@ struct TextReaderView: View {
             },
             progress: progress,
             spokenRange: tts.spokenRange,
-            onTap: { showBars.toggle() },
-            pageColumns: settings.pageColumns,
-            pageLayout: isPrimary ? pageLayout : nil,
-            isPrimary: isPrimary
+            pageNavigationDirection: $pageNavigationDirection,
+            searchQuery: searchQuery,
+            searchResultIndex: searchResultIndex,
+            onTap: { showBars.toggle() }
         )
     }
-#endif
-}
-
-// Reference-type channels for coordinator → SwiftUI communication on macOS.
-// The coordinator holds only weak references to these objects. If the view is
-// dismantled before the coordinator is finally released (e.g. via AppKit's
-// gesture-recognizer retain chain), writes become safe no-ops instead of crashing.
-final class PageStepState: ObservableObject {
-    @Published var value: Double = 0
-    // Primary's scrollable pixel range; set before value so it is readable in the
-    // re-render that value triggers. Not @Published — no extra re-render needed.
-    var scrollable: CGFloat = 0
-#if os(macOS)
-    // Direct reference to the secondary column's scroll view. The primary
-    // coordinator writes to this instead of relying on SwiftUI re-render timing
-    // (which is unreliable when the window is first sized and content is laid out).
-    weak var secondaryScrollView: NSScrollView?
-    // Visible height of the primary scroll view; set alongside scrollable.
-    var pageHeight: CGFloat = 0
 #endif
 }
 
@@ -149,17 +111,15 @@ struct NativeTextView: NSViewRepresentable {
     var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
     var progress: Double
     var spokenRange: NSRange?
+    var searchQuery: String = ""
+    var searchResultIndex: Int = 0
     // Coordinator communicates scroll position and taps back to SwiftUI via this
     // channel. Using a weak reference in the coordinator means the coordinator can
     // never crash accessing freed SwiftUI backing stores, regardless of teardown order.
     var eventChannel: TextViewEventChannel? = nil
-    var pageColumns: Int = 1
-    var pageLayout: PageStepState? = nil
-    var isPrimary: Bool = true
 
     func makeCoordinator() -> Coordinator {
-        let c = Coordinator(pageColumns: pageColumns, isPrimary: isPrimary)
-        c.pageLayout = pageLayout
+        let c = Coordinator()
         c.eventChannel = eventChannel
         return c
     }
@@ -176,34 +136,13 @@ struct NativeTextView: NSViewRepresentable {
         recognizer.numberOfClicksRequired = 1
         textView.addGestureRecognizer(recognizer)
         context.coordinator.scrollView = scrollView
-        if !isPrimary && pageColumns > 1 {
-            // Let the primary coordinator position us directly (pixel-accurate,
-            // no SwiftUI re-render timing dependency).
-            pageLayout?.secondaryScrollView = scrollView
-        }
-        if isPrimary {
-            // didLiveScrollNotification fires only on user-initiated gestures — never
-            // from programmatic scrolls inside updateNSView, so writing bindings is safe.
-            NotificationCenter.default.addObserver(
-                context.coordinator,
-                selector: #selector(Coordinator.didLiveScroll),
-                name: NSScrollView.didLiveScrollNotification,
-                object: scrollView
-            )
-            context.coordinator.installKeyMonitor()
-            if pageColumns > 1 {
-                // Observe the CLIP VIEW's frame changes (window layout, resize) so we can
-                // compute pageStep once the visible height is known. Safe: NSClipView does
-                // not fire frameDidChangeNotification during NSTextView deallocation.
-                scrollView.contentView.postsFrameChangedNotifications = true
-                NotificationCenter.default.addObserver(
-                    context.coordinator,
-                    selector: #selector(Coordinator.clipViewFrameChanged),
-                    name: NSView.frameDidChangeNotification,
-                    object: scrollView.contentView
-                )
-            }
-        }
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.didLiveScroll),
+            name: NSScrollView.didLiveScrollNotification,
+            object: scrollView
+        )
+        context.coordinator.installKeyMonitor()
         return scrollView
     }
 
@@ -215,45 +154,108 @@ struct NativeTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let textView = scrollView.documentView as! NSTextView
-        // Keep coordinator channel references current (makeCoordinator runs only once;
-        // the struct property may have changed identity across re-renders).
-        context.coordinator.pageLayout = pageLayout
 
-        // Only rebuild content when text/style/highlights actually change — never on
-        // the frequent progress updates that scrolling produces.  Rebuilding the full
-        // attributed string on every SwiftUI tick blocks the main thread and creates a
-        // layout loop that prevents text from ever painting.
-        let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)|hl\(highlights.count)"
+        let macFontName = embeddedFontName ?? settings.fontName
+        let macLayoutKey = "\(macFontName)|\(settings.fontSize)|\(settings.lineSpacing)"
+        let macColorKey = "\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
             if !blocks.isEmpty {
-                // Include a coarse width bucket so images are re-scaled when
-                // the window is resized after the initial (zero-width) render.
                 let bucket = (Int(textView.bounds.width) / 50) * 50
                 return "blocks-\(blocks.count)-w\(bucket)"
             }
             return text.map { "txt-\($0.count)" }
                 ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
         }()
-        if context.coordinator.lastStyleKey != styleKey
-            || context.coordinator.lastContentKey != contentKey {
-            autoreleasepool {
-                applyContent(to: textView)
-                // Only the primary calls sizeToFit(). The primary's scrollable
-                // range is stored in PageStepState and used to set the secondary's
-                // frame height directly in updatePageStep — avoiding a full
-                // NSLayoutManager layout on the secondary, which creates large
-                // glyph/line-fragment arrays that AppKit may autorelease during
-                // window teardown (causing EXC_BAD_ACCESS in NSArrayM.dealloc).
-                if isPrimary && pageColumns > 1 { textView.sizeToFit() }
-            }
-            context.coordinator.lastStyleKey = styleKey
+
+        let macLayoutChanged = context.coordinator.lastLayoutKey != macLayoutKey
+            || context.coordinator.lastContentKey != contentKey
+        let macColorChanged = context.coordinator.lastColorKey != macColorKey
+
+        if macLayoutChanged {
+            autoreleasepool { applyContent(to: textView) }
+            context.coordinator.lastLayoutKey = macLayoutKey
+            context.coordinator.lastColorKey = macColorKey
             context.coordinator.lastContentKey = contentKey
+        } else if macColorChanged {
+            applyColorOnly(to: textView)
+            context.coordinator.lastColorKey = macColorKey
         }
 
-        // Scroll to progress if it was changed externally (e.g. dragging the progress bar)
-        context.coordinator.scrollToProgress(progress)
+        if macLayoutChanged, let sv = context.coordinator.scrollView {
+            context.coordinator.scheduleProgressRestore(progress, in: sv)
+        } else {
+            context.coordinator.scrollToProgress(progress)
+        }
+
+        // Search: find all matches, highlight active one, scroll to it.
+        let queryChanged = context.coordinator.lastSearchQuery != searchQuery
+        let indexChanged = context.coordinator.lastSearchResultIndex != searchResultIndex
+        if queryChanged {
+            context.coordinator.lastSearchQuery = searchQuery
+            context.coordinator.lastSearchResultIndex = searchResultIndex
+            if !searchQuery.isEmpty, let storage = textView.textStorage, storage.length > 0 {
+                context.coordinator.searchMatches = allMatches(of: searchQuery, in: storage.string)
+            } else {
+                context.coordinator.searchMatches = []
+            }
+        } else if indexChanged {
+            context.coordinator.lastSearchResultIndex = searchResultIndex
+        }
+        if queryChanged || indexChanged {
+            applySearchHighlight(to: textView,
+                                 matches: context.coordinator.searchMatches,
+                                 index: searchResultIndex)
+        }
+
         let highlight = NSColor(settings.currentPreset.text).withAlphaComponent(0.18)
         context.coordinator.updateHighlight(spokenRange, in: textView, color: highlight)
+    }
+
+    private func allMatches(of query: String, in string: String) -> [NSRange] {
+        var matches: [NSRange] = []
+        let ns = string as NSString
+        var searchRange = NSRange(location: 0, length: ns.length)
+        while searchRange.length > 0 {
+            let found = ns.range(of: query, options: .caseInsensitive, range: searchRange)
+            guard found.location != NSNotFound else { break }
+            matches.append(found)
+            let next = NSMaxRange(found)
+            searchRange = NSRange(location: next, length: ns.length - next)
+        }
+        return matches
+    }
+
+    private func applySearchHighlight(to textView: NSTextView, matches: [NSRange], index: Int) {
+        guard let storage = textView.textStorage else { return }
+        storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
+        guard !matches.isEmpty else { return }
+        let active = matches[index % matches.count]
+        // Dim all matches, brighten the active one.
+        for m in matches {
+            storage.addAttribute(.backgroundColor,
+                                 value: NSColor.systemYellow.withAlphaComponent(0.3), range: m)
+        }
+        storage.addAttribute(.backgroundColor,
+                             value: NSColor.systemYellow.withAlphaComponent(0.75), range: active)
+        textView.scrollRangeToVisible(active)
+    }
+
+    // Apply only color/theme changes without touching text content or glyph layout.
+    // Called when presetId or highlights change but font/size/lineSpacing are unchanged,
+    // so there is no need to reset attributedText or run a position restore.
+    private func applyColorOnly(to textView: NSTextView) {
+        let color = NSColor(settings.currentPreset.text)
+        textView.textColor = color
+        if let storage = textView.textStorage, storage.length > 0 {
+            storage.addAttribute(.foregroundColor, value: color,
+                                 range: NSRange(location: 0, length: storage.length))
+            for h in highlights where NSMaxRange(h.range) <= storage.length {
+                storage.addAttribute(.backgroundColor,
+                                     value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
+                                     range: h.range)
+            }
+        }
+        textView.backgroundColor = NSColor(settings.currentPreset.background)
     }
 
     private func applyContent(to textView: NSTextView) {
@@ -277,7 +279,13 @@ struct NativeTextView: NSViewRepresentable {
                 if let sv = textView.enclosingScrollView, sv.bounds.width > 50 {
                     return sv.bounds.width - 50
                 }
-                return (NSScreen.main?.frame.width ?? 800) - 80
+                // Window width is a reliable fallback when the text view hasn't
+                // been laid out yet (e.g., first render). Screen width is wrong
+                // here — it's too wide for a 700pt-wide window on a large display.
+                if let win = textView.window, win.frame.width > 100 {
+                    return win.frame.width - 100
+                }
+                return 600
             }()
             let result = NSMutableAttributedString()
             for block in blocks {
@@ -306,13 +314,19 @@ struct NativeTextView: NSViewRepresentable {
             if textView.string != str {
                 textView.textStorage?.setAttributedString(NSAttributedString(attr))
             }
-        } else if let str = text, textView.string != str {
-            textView.textStorage?.setAttributedString(NSAttributedString(string: str))
+            // Re-apply style attrs for any unstyled ranges (attributed content may lack them).
+            if let storage = textView.textStorage, storage.length > 0 {
+                storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
+            }
+        } else if let str = text {
+            // Embed all style (font, color, paragraph style) into the NSAttributedString
+            // before calling setAttributedString. setAttributedString is lazy (layout
+            // invalidated, not forced synchronously), whereas calling addAttributes on an
+            // already-laid-out storage forces a synchronous full-document layout pass.
+            textView.textStorage?.setAttributedString(NSAttributedString(string: str, attributes: styleAttrs))
         }
 
-        // Always re-apply style attributes so font/color/spacing changes take effect
         if let storage = textView.textStorage, storage.length > 0 {
-            storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
             for h in highlights where NSMaxRange(h.range) <= storage.length {
                 storage.addAttribute(.backgroundColor,
                                      value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
@@ -328,21 +342,17 @@ struct NativeTextView: NSViewRepresentable {
         // references means all writes become no-ops after the view is dismantled,
         // regardless of teardown order. No closures, no @Binding captures.
         weak var eventChannel: TextViewEventChannel?
-        weak var pageLayout: PageStepState?
-        var pageColumns: Int
-        let isPrimary: Bool
         weak var scrollView: NSScrollView?
         var isScrollingProgrammatically = false
         var isDismantled = false
         private var lastHighlight: NSRange?
-        var lastStyleKey = ""
+        var lastLayoutKey = ""
+        var lastColorKey = ""
         var lastContentKey = ""
+        var lastSearchQuery = ""
+        var lastSearchResultIndex = 0
+        var searchMatches: [NSRange] = []
         private var keyMonitor: Any?
-
-        init(pageColumns: Int, isPrimary: Bool) {
-            self.pageColumns = pageColumns
-            self.isPrimary = isPrimary
-        }
 
         func installKeyMonitor() {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -364,61 +374,95 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - pageHeight
             guard scrollable > 0 else { return }
             let current = sv.contentView.bounds.origin.y
-            // In double-page mode advance two pages at once so the spread turns together.
-            let step = CGFloat(pageColumns) * pageHeight
-            let target = max(0, min(current + CGFloat(direction) * step, scrollable))
+            let target = max(0, min(current + CGFloat(direction) * pageHeight, scrollable))
             guard abs(target - current) > 1 else { return }
             isScrollingProgrammatically = true
             sv.contentView.scroll(to: NSPoint(x: 0, y: target))
             sv.reflectScrolledClipView(sv.contentView)
             isScrollingProgrammatically = false
-            // Position secondary synchronously so both columns advance together.
-            pageLayout?.pageHeight = pageHeight
-            positionSecondary()
             let capturedScrollable = scrollable
-            let capturedPageHeight = pageHeight
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isDismantled else { return }
                 self.eventChannel?.scrollProgress = target / capturedScrollable
-                self.updatePageStep(scrollable: capturedScrollable, pageHeight: capturedPageHeight)
             }
         }
 
         func updateHighlight(_ range: NSRange?, in textView: NSTextView, color: NSColor) {
             if let a = range, let b = lastHighlight, NSEqualRanges(a, b) { return }
             if range == nil && lastHighlight == nil { return }
-            guard let storage = textView.textStorage else { return }
-            if let old = lastHighlight, NSMaxRange(old) <= storage.length {
-                storage.removeAttribute(.backgroundColor, range: old)
-            }
+            guard let storage = textView.textStorage, storage.length > 0 else { return }
             lastHighlight = range
+            // Clear ALL background colors across the full document, then apply the
+            // new sentence. Removing only lastHighlight leaves stale color when the
+            // storage is rebuilt (e.g. window resize) between two highlight calls.
+            storage.removeAttribute(.backgroundColor,
+                                    range: NSRange(location: 0, length: storage.length))
             if let r = range, NSMaxRange(r) <= storage.length {
                 storage.addAttribute(.backgroundColor, value: color, range: r)
-                // Guard the scroll so boundsChanged doesn't fire during updateNSView.
                 isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
                 isScrollingProgrammatically = false
             }
         }
 
+        // Token used to cancel stale restore attempts when content reloads.
+        private var restoreToken = 0
+        private var isRestoring = false
+
+        func scheduleProgressRestore(_ target: Double, in sv: NSScrollView) {
+            restoreToken &+= 1
+            isRestoring = true
+            let token = restoreToken
+            DispatchQueue.main.async { [weak self, weak sv] in
+                guard let self, let sv, self.restoreToken == token else { return }
+                self.performRestore(target, in: sv, token: token, retries: 20)
+            }
+        }
+
+        private func performRestore(_ target: Double, in sv: NSScrollView, token: Int, retries: Int) {
+            guard restoreToken == token else { isRestoring = false; return }
+            guard let textView = sv.documentView as? NSTextView,
+                  textView.textStorage?.length ?? 0 > 0,
+                  sv.contentView.bounds.height > 0 else {
+                if retries > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak sv] in
+                        guard let self, let sv else { return }
+                        self.performRestore(target, in: sv, token: token, retries: retries - 1)
+                    }
+                } else { isRestoring = false }
+                return
+            }
+            // Proportional scroll — avoids ensureLayout(forCharacterRange:) which
+            // synchronously lays out the full document up to the target character,
+            // freezing the UI for seconds when deep into a large book.
+            let contentHeight = textView.frame.height
+            let visibleHeight = sv.contentView.bounds.height
+            let maxY = max(0, contentHeight - visibleHeight)
+            let scrollY = min(contentHeight * target, maxY)
+            isScrollingProgrammatically = true
+            sv.contentView.scroll(to: NSPoint(x: 0, y: scrollY))
+            sv.reflectScrolledClipView(sv.contentView)
+            isScrollingProgrammatically = false
+
+            // If offset didn't stick (layout not ready yet), retry.
+            if target > 0.001, sv.contentView.bounds.origin.y < 1, retries > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak sv] in
+                    guard let self, let sv else { return }
+                    self.performRestore(target, in: sv, token: token, retries: retries - 1)
+                }
+                return
+            }
+            isRestoring = false
+        }
+
         func scrollToProgress(_ target: Double) {
-            // Secondary position is driven directly by positionSecondary() on the
-            // primary coordinator — pixel-accurate, no fraction math, no timing race.
-            guard isPrimary else { return }
             guard let sv = scrollView else { return }
+            // If a content-change restore is in flight, don't fight it.
+            guard !isRestoring else { return }
 
             let contentHeight = sv.documentView?.frame.height ?? 0
             let visibleHeight = sv.contentView.bounds.height
             let s = contentHeight - visibleHeight
-            if s > 0 {
-                let h = visibleHeight
-                // autoreleasepool: RunLoop.main.perform has no inner pool; AppKit
-                // layout calls inside updatePageStep can autorelease objects into
-                // the NSApplication pool if not captured here.
-                RunLoop.main.perform { [weak self] in
-                    autoreleasepool { self?.updatePageStep(scrollable: s, pageHeight: h) }
-                }
-            }
             guard s > 0 else { return }
 
             let targetOffset = target * s
@@ -433,25 +477,6 @@ struct NativeTextView: NSViewRepresentable {
             isScrollingProgrammatically = false
         }
 
-        // Set the secondary column's scroll position to exactly one page (pageHeight
-        // pixels) past the primary. Called whenever the primary's position changes.
-        private func positionSecondary() {
-            guard isPrimary, pageColumns > 1 else { return }
-            guard let layout = pageLayout, layout.pageHeight > 0 else { return }
-            guard let secondarySV = layout.secondaryScrollView else { return }
-            guard let primarySV = scrollView else { return }
-            let primaryOffset = primarySV.contentView.bounds.origin.y
-            let targetOffset = primaryOffset + layout.pageHeight
-            let docHeight = secondarySV.documentView?.frame.height ?? 0
-            guard docHeight > targetOffset else { return }
-            let currentOffset = secondarySV.contentView.bounds.origin.y
-            guard abs(targetOffset - currentOffset) > 1 else { return }
-            autoreleasepool {
-                secondarySV.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
-                secondarySV.reflectScrolledClipView(secondarySV.contentView)
-            }
-        }
-
         @objc func didLiveScroll(_ notification: Notification) {
             guard !isDismantled, let sv = scrollView else { return }
             let contentHeight = sv.documentView?.frame.height ?? 0
@@ -460,48 +485,6 @@ struct NativeTextView: NSViewRepresentable {
             guard scrollable > 0 else { return }
             let offset = sv.contentView.bounds.origin.y
             eventChannel?.scrollProgress = max(0, min(offset / scrollable, 1))
-            updatePageStep(scrollable: scrollable, pageHeight: visibleHeight)
-        }
-
-        private func updatePageStep(scrollable: CGFloat, pageHeight: CGFloat) {
-            guard isPrimary, pageColumns > 1, scrollable > 0 else { return }
-            pageLayout?.scrollable = scrollable
-            pageLayout?.pageHeight = pageHeight
-            // Expand the secondary's frame to match the primary's document height.
-            // We skip sizeToFit() on the secondary (avoids creating a full
-            // NSLayoutManager layout that can crash during window teardown), so
-            // the frame must be set explicitly to let NSScrollView scroll to
-            // targetOffset without clamping. Wrap in autoreleasepool: setFrameSize
-            // can trigger NSLayoutManager re-layout that autoreleases glyph objects.
-            if let secondarySV = pageLayout?.secondaryScrollView,
-               let secondaryTV = secondarySV.documentView as? NSTextView {
-                let needed = scrollable + pageHeight
-                if secondaryTV.frame.height < needed - 1 {
-                    autoreleasepool {
-                        secondaryTV.setFrameSize(NSSize(width: secondaryTV.frame.width,
-                                                        height: needed))
-                    }
-                }
-            }
-            let newStep = Double(pageHeight / scrollable)
-            if abs(newStep - (pageLayout?.value ?? 0)) > 0.001 {
-                pageLayout?.value = newStep
-            }
-            // Position the secondary column now that we know the page height.
-            positionSecondary()
-        }
-
-        @objc func clipViewFrameChanged(_ notification: Notification) {
-            guard !isDismantled, isPrimary, pageColumns > 1 else { return }
-            guard let sv = scrollView else { return }
-            let contentHeight = sv.documentView?.frame.height ?? 0
-            let visibleHeight = sv.contentView.bounds.height
-            let scrollable = contentHeight - visibleHeight
-            guard scrollable > 0 else { return }
-            let s = scrollable, h = visibleHeight
-            RunLoop.main.perform { [weak self] in
-                autoreleasepool { self?.updatePageStep(scrollable: s, pageHeight: h) }
-            }
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { eventChannel?.tapCount += 1 }
@@ -512,6 +495,19 @@ struct NativeTextView: NSViewRepresentable {
 
 #else
 import UIKit
+import ImageIO
+
+// Subclass so we can hook into layoutSubviews after super has finished.
+// After super.layoutSubviews(), contentSize is final and UITextView has already
+// reset contentOffset to 0 (its internal behavior on attributedText replacement).
+// This is the only place guaranteed to run after both of those steps.
+private final class ReaderTextView: UITextView {
+    var onDidLayout: (() -> Void)?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onDidLayout?()
+    }
+}
 
 struct NativeTextView: UIViewRepresentable {
     let text: String?
@@ -527,15 +523,10 @@ struct NativeTextView: UIViewRepresentable {
     var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
     @Binding var progress: Double
     var spokenRange: NSRange?
+    var pageNavigationDirection: Binding<Int>? = nil
+    var searchQuery: String = ""
+    var searchResultIndex: Int = 0
     let onTap: () -> Void
-    var pageColumns: Int = 1
-    var pageLayout: PageStepState? = nil
-    var isPrimary: Bool = true
-
-    // Above this length we skip the per-character paragraph-style pass,
-    // since addAttributes over the whole storage forces a synchronous
-    // full-document layout that freezes the UI on open.
-    private static let paragraphStyleLimit = 200_000
 
     func makeCoordinator() -> Coordinator {
         Coordinator(progress: $progress, autoScrolling: $autoScrolling, onTap: onTap)
@@ -545,8 +536,13 @@ struct NativeTextView: UIViewRepresentable {
         // Force TextKit 1 (accessing layoutManager opts out of TextKit 2),
         // which scrolls very large documents more smoothly and avoids the
         // relayout jank seen when returning from the background.
-        let textView = UITextView(usingTextLayoutManager: false)
+        let textView = ReaderTextView(usingTextLayoutManager: false)
         _ = textView.layoutManager
+        let coordinator = context.coordinator
+        textView.onDidLayout = { [weak coordinator, weak textView] in
+            guard let coordinator, let textView else { return }
+            coordinator.didLayout(in: textView)
+        }
         textView.isEditable = false
         textView.isSelectable = false      // reading view: no text selection (fixes tap-selects-text)
         textView.isScrollEnabled = true
@@ -556,6 +552,8 @@ struct NativeTextView: UIViewRepresentable {
         textView.delegate = context.coordinator
         context.coordinator.textView = textView
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        tap.delegate = context.coordinator
+        tap.delaysTouchesEnded = false
         textView.addGestureRecognizer(tap)
 
         // Horizontal swipes page the same way as the tap zones.
@@ -563,6 +561,7 @@ struct NativeTextView: UIViewRepresentable {
             let swipe = UISwipeGestureRecognizer(target: context.coordinator,
                                                  action: #selector(Coordinator.handleSwipe(_:)))
             swipe.direction = direction
+            swipe.delegate = context.coordinator
             textView.addGestureRecognizer(swipe)
         }
         return textView
@@ -574,43 +573,135 @@ struct NativeTextView: UIViewRepresentable {
         context.coordinator.setAutoScrolling(autoScrolling)
         context.coordinator.highlightMode = highlightMode
         context.coordinator.onAddHighlight = onAddHighlight
+        context.coordinator.userHighlights = highlights
+
+        // External page navigation (keyboard, hardware buttons).
+        let navDir = pageNavigationDirection?.wrappedValue ?? 0
+        if navDir != 0, let tv = context.coordinator.textView {
+            context.coordinator.page(tv, forward: navDir > 0)
+            let binding = pageNavigationDirection
+            DispatchQueue.main.async { binding?.wrappedValue = 0 }
+        }
         // In highlight mode allow text selection (so the user can pick a range);
         // otherwise selection stays off so taps drive paging.
         textView.isSelectable = highlightMode
-        // Paper mode: navigation is tap/swipe only — block free-scroll gestures.
-        // Programmatic setContentOffset in page() still works when isScrollEnabled=false.
-        textView.isScrollEnabled = pageEffect != .paper
+        textView.isScrollEnabled = true
+        // Paper mode: disable the scroll view's pan gesture so finger-dragging is
+        // blocked, while isScrollEnabled stays true so UITextView lays out content.
+        textView.panGestureRecognizer.isEnabled = pageEffect != .paper
+        textView.alwaysBounceVertical = pageEffect != .paper
 
-        // Only restyle when text/style/highlights actually change — never on the
-        // frequent progress updates that scrolling produces.
-        let styleKey = "\(embeddedFontName ?? settings.fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(settings.presetId)|hl\(highlights.count)"
+        // Two-tier change detection:
+        // • layout changed (text, font, size, spacing) → applyContent + scheduleRestore
+        //   applyContent now uses a single lazy attributedText= with style embedded,
+        //   so no synchronous layout pass runs on the main thread.
+        // • color/highlight only → applyColorOnly (attribute-only, no layout triggered)
+        let fontName = embeddedFontName ?? settings.fontName
+        let layoutKey = "\(fontName)|\(settings.fontSize)|\(settings.lineSpacing)"
+        let colorKey = "\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
             if !blocks.isEmpty { return "blocks-\(blocks.count)" }
             return text.map { "txt-\($0.count)" }
                 ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
         }()
 
-        let contentChanged = context.coordinator.lastStyleKey != styleKey
+        let layoutChanged = context.coordinator.lastLayoutKey != layoutKey
             || context.coordinator.lastContentKey != contentKey
-        if contentChanged {
+        let colorChanged = context.coordinator.lastColorKey != colorKey
+
+        if layoutChanged {
             applyContent(to: textView)
             textView.backgroundColor = UIColor(settings.currentPreset.background)
-            context.coordinator.lastStyleKey = styleKey
+            context.coordinator.lastLayoutKey = layoutKey
+            context.coordinator.lastColorKey = colorKey
             context.coordinator.lastContentKey = contentKey
-        }
-
-        if contentChanged {
-            // Content was (re)built — restore to the current/saved position,
-            // retrying until the text view is actually laid out.
             context.coordinator.scheduleRestore(progress, in: textView)
+        } else if colorChanged {
+            applyColorOnly(to: textView)
+            textView.backgroundColor = UIColor(settings.currentPreset.background)
+            context.coordinator.lastColorKey = colorKey
+            context.coordinator.syncProgress(progress, in: textView)
         } else {
-            // Only progress changed (e.g. dragging the bar) — seek there.
             context.coordinator.syncProgress(progress, in: textView)
         }
 
-        // TTS highlight + auto-scroll
+        // TTS highlight + auto-scroll.
+        // When spokenRange becomes nil (TTS stopped), reset lastReportedProgress so
+        // syncProgress doesn't re-apply the TTS position on the next update.
         let highlight = UIColor(settings.currentPreset.text).withAlphaComponent(0.18)
+        if spokenRange == nil, context.coordinator.lastHighlightWasSpoken {
+            context.coordinator.lastReportedProgressPublic = nil
+        }
+        context.coordinator.lastHighlightWasSpoken = spokenRange != nil
         context.coordinator.updateHighlight(spokenRange, in: textView, color: highlight)
+
+        // Search: find all matches, highlight active one, scroll to it.
+        let searchQueryChanged = context.coordinator.lastSearchQuery != searchQuery
+        let searchIndexChanged = context.coordinator.lastSearchResultIndex != searchResultIndex
+        if searchQueryChanged {
+            context.coordinator.lastSearchQuery = searchQuery
+            context.coordinator.lastSearchResultIndex = searchResultIndex
+            if !searchQuery.isEmpty {
+                let str = textView.textStorage.string
+                context.coordinator.searchMatches = iOSAllMatches(of: searchQuery, in: str)
+            } else {
+                context.coordinator.searchMatches = []
+            }
+        } else if searchIndexChanged {
+            context.coordinator.lastSearchResultIndex = searchResultIndex
+        }
+        if searchQueryChanged || searchIndexChanged {
+            iOSApplySearchHighlight(to: textView,
+                                    matches: context.coordinator.searchMatches,
+                                    index: searchResultIndex,
+                                    coordinator: context.coordinator)
+        }
+    }
+
+    private func iOSAllMatches(of query: String, in string: String) -> [NSRange] {
+        var matches: [NSRange] = []
+        let ns = string as NSString
+        var searchRange = NSRange(location: 0, length: ns.length)
+        while searchRange.length > 0 {
+            let found = ns.range(of: query, options: .caseInsensitive, range: searchRange)
+            guard found.location != NSNotFound else { break }
+            matches.append(found)
+            let next = NSMaxRange(found)
+            searchRange = NSRange(location: next, length: ns.length - next)
+        }
+        return matches
+    }
+
+    private func iOSApplySearchHighlight(to textView: UITextView,
+                                         matches: [NSRange],
+                                         index: Int,
+                                         coordinator: Coordinator) {
+        let storage = textView.textStorage
+        storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
+        guard !matches.isEmpty else { return }
+        let active = matches[index % matches.count]
+        for m in matches {
+            storage.addAttribute(.backgroundColor,
+                                 value: UIColor.systemYellow.withAlphaComponent(0.3), range: m)
+        }
+        storage.addAttribute(.backgroundColor,
+                             value: UIColor.systemYellow.withAlphaComponent(0.75), range: active)
+        coordinator.isScrollingProgrammatically = true
+        textView.scrollRangeToVisible(active)
+        coordinator.isScrollingProgrammatically = false
+    }
+
+    // Apply only color/theme changes without touching text content or glyph layout.
+    // Called when presetId or highlights change but font/size/lineSpacing are unchanged,
+    // so there is no need to reset attributedText or run a position restore.
+    private func applyColorOnly(to textView: UITextView) {
+        let color = UIColor(settings.currentPreset.text)
+        textView.textColor = color
+        if textView.textStorage.length > 0, !blocks.isEmpty || attributedText != nil {
+            textView.textStorage.addAttribute(.foregroundColor, value: color,
+                                             range: NSRange(location: 0, length: textView.textStorage.length))
+        }
+        applyHighlights(to: textView)
     }
 
     private func applyContent(to textView: UITextView) {
@@ -621,7 +712,12 @@ struct NativeTextView: UIViewRepresentable {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = settings.lineSpacing
 
-        // EPUB with images: build a rich NSAttributedString from blocks
+        // EPUB with images: build a rich NSAttributedString from blocks.
+        // Phase 1 (main thread, synchronous): insert text blocks and size-correct
+        //   placeholder attachments — no pixel decoding, so the textView gets its
+        //   content (and an accurate contentSize for restore) immediately.
+        // Phase 2 (background Task): decode each image's pixels, swap the placeholder's
+        //   image property, and invalidate the layout for that glyph only.
         if !blocks.isEmpty {
             // textView may not be laid out yet → fall back to the screen width
             let insets = textView.textContainerInset.left + textView.textContainerInset.right + 10
@@ -631,47 +727,124 @@ struct NativeTextView: UIViewRepresentable {
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle
             ]
-            var imageCount = 0, decoded = 0
+
+            // (offset-in-result, raw Data) — both Sendable, safe to cross actor boundaries.
+            // NSTextAttachment is NOT Sendable so we must NOT capture it in the Task;
+            // instead we retrieve it from the text storage on the MainActor side.
+            var pending: [(Int, Data)] = []
             let result = NSMutableAttributedString()
+
             for block in blocks {
                 switch block {
                 case .text(let s):
                     result.append(NSAttributedString(string: s + "\n\n", attributes: attrs))
                 case .image(let data):
-                    imageCount += 1
-                    if let image = UIImage(data: data) {
-                        decoded += 1
-                        let attachment = NSTextAttachment()
-                        attachment.image = image
-                        let scale = min(1, available / max(image.size.width, 1))
+                    let attachment = NSTextAttachment()
+                    // Read pixel dimensions from the image header without decompressing
+                    // pixel data.  This gives the correct aspect ratio for the placeholder
+                    // so contentSize is accurate and the restore scroll is on-target.
+                    if let sz = Self.quickImageSize(data) {
+                        let scale = min(1, available / max(sz.width, 1))
                         attachment.bounds = CGRect(x: 0, y: 0,
-                                                   width: image.size.width * scale,
-                                                   height: image.size.height * scale)
-                        result.append(NSAttributedString(attachment: attachment))
-                        result.append(NSAttributedString(string: "\n\n", attributes: attrs))
+                                                   width: sz.width * scale,
+                                                   height: sz.height * scale)
+                    } else {
+                        attachment.bounds = CGRect(x: 0, y: 0, width: available, height: available * 0.75)
+                    }
+                    pending.append((result.length, data))
+                    result.append(NSAttributedString(attachment: attachment))
+                    result.append(NSAttributedString(string: "\n\n", attributes: attrs))
+                }
+            }
+
+            print("[EPUB] render: \(blocks.count) blocks, \(pending.count) images (placeholder), width=\(available)")
+            textView.attributedText = result
+            applyHighlights(to: textView)
+
+            // Phase 2: rebuild the full attributed string on a background thread with
+            // every image decoded, then swap it in one shot on the main thread.
+            // Per-glyph addAttribute / invalidateDisplay updates are unreliable on
+            // iOS 16+ (the NSLayoutManager glyph cache for attachment characters is
+            // not guaranteed to flush on attribute-only edits).  A single full
+            // attributedText= swap is the only path that always triggers a complete
+            // redraw, at the cost of a brief blank period during decoding.
+            //
+            // Phase 1 above already set correctly-sized placeholder attachments so
+            // contentSize is accurate and attemptRestore can scroll to the right
+            // position before phase 2 finishes.  Phase 2 then saves the (restored)
+            // offset, swaps in the real images, and restores the offset one run-loop
+            // cycle later (after UITextView resets it to 0 on attributedText set).
+            guard !pending.isEmpty else { return }
+            let capturedBlocks = blocks
+            let capturedAttrs = attrs
+            let capturedAvailable = available
+            let viewCapture = self      // NativeTextView is a value type — safe to copy
+            DispatchQueue.global(qos: .userInitiated).async {
+                let full = NSMutableAttributedString()
+                for block in capturedBlocks {
+                    switch block {
+                    case .text(let s):
+                        full.append(NSAttributedString(string: s + "\n\n",
+                                                       attributes: capturedAttrs))
+                    case .image(let data):
+                        let att = NSTextAttachment()
+                        if let image = UIImage(data: data) {
+                            att.image = image
+                            let scale = min(1.0, capturedAvailable / max(image.size.width, 1))
+                            att.bounds = CGRect(x: 0, y: 0,
+                                                width: image.size.width * scale,
+                                                height: image.size.height * scale)
+                        } else {
+                            att.bounds = CGRect(x: 0, y: 0,
+                                                width: capturedAvailable,
+                                                height: capturedAvailable * 0.75)
+                        }
+                        full.append(NSAttributedString(attachment: att))
+                        full.append(NSAttributedString(string: "\n\n", attributes: capturedAttrs))
+                    }
+                }
+                let final = NSAttributedString(attributedString: full)
+                DispatchQueue.main.async { [weak textView] in
+                    // tv.window check was removed: on iOS 26 fullScreenCover builds
+                    // the view in a staging layer before attaching it to a window,
+                    // so tv.window is nil even while the book is actively displayed.
+                    // [weak textView] already guards against dismissed books — UIKit
+                    // zeroes weak refs before dealloc, so textView is nil (and we
+                    // return early) by the time the teardown actually runs.
+                    guard let tv = textView else {
+                        print("[EPUB P2] textView was nil — book dismissed before decode finished")
+                        return
+                    }
+                    print("[EPUB P2] applying full attributed string, window=\(tv.window != nil)")
+                    let savedOffset = tv.contentOffset
+                    tv.attributedText = final
+                    viewCapture.applyHighlights(to: tv)
+                    // UITextView resets contentOffset to {0,0} when attributedText is
+                    // replaced.  Restore the saved offset one run-loop cycle later so
+                    // the internal layout pass triggered by the swap completes first.
+                    DispatchQueue.main.async {
+                        tv.setContentOffset(savedOffset, animated: false)
                     }
                 }
             }
-            print("[EPUB] render: \(blocks.count) blocks, \(imageCount) images, \(decoded) decoded, width=\(available)")
-            textView.attributedText = result
-            applyHighlights(to: textView)
             return
         }
 
         if let attr = attributedText {
             textView.attributedText = NSAttributedString(attr)
+            // font/textColor serve as fallbacks for any unstyled ranges in the attributed string.
+            textView.font = font
+            textView.textColor = color
         } else if let str = text {
-            textView.text = str
-        }
-        // Cheap, lazy — applies as default attributes without full relayout
-        textView.font = font
-        textView.textColor = color
-
-        // Line spacing needs an attribute pass — affordable only for smaller docs
-        let storage = textView.textStorage
-        if storage.length > 0, storage.length <= Self.paragraphStyleLimit, settings.lineSpacing > 0 {
-            storage.addAttribute(.paragraphStyle, value: paragraphStyle,
-                                 range: NSRange(location: 0, length: storage.length))
+            // Embed font, color, and paragraph style into the attributed string before
+            // handing it to UITextView. A single attributedText= is a lazy operation
+            // (layout is invalidated, not forced synchronously), whereas setting text= and
+            // then calling storage.addAttribute(.paragraphStyle, ...) would force a
+            // synchronous full-document layout pass on the main thread — freezing the UI
+            // for several seconds in large books.
+            var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+            if settings.lineSpacing > 0 { attrs[.paragraphStyle] = paragraphStyle }
+            textView.attributedText = NSAttributedString(string: str, attributes: attrs)
         }
         applyHighlights(to: textView)
     }
@@ -684,16 +857,36 @@ struct NativeTextView: UIViewRepresentable {
         }
     }
 
-    class Coordinator: NSObject, UITextViewDelegate {
+    // Read pixel dimensions from the image file header without decompressing
+    // pixel data.  JPEG stores dimensions in the SOF segment; PNG in the IHDR.
+    // CGImageSource reads only the metadata markers, not the bitmap, so this
+    // runs in microseconds even for multi-megabyte images.
+    private static func quickImageSize(_ data: Data) -> CGSize? {
+        let opts = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let src = CGImageSourceCreateWithData(data as CFData, opts),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, opts) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int,
+              let h = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
         @Binding var progress: Double
         @Binding var autoScrolling: Bool
         let onTap: () -> Void
         weak var textView: UITextView?
         var isScrollingProgrammatically = false
-        var lastStyleKey = ""
+        var lastLayoutKey = ""
+        var lastColorKey = ""
         var lastContentKey = ""
-        private var lastReportedProgress: Double?   // last value WE pushed from scrolling
+        private var lastReportedProgress: Double?
+        var lastReportedProgressPublic: Double? {
+            get { lastReportedProgress }
+            set { lastReportedProgress = newValue }
+        }
         private var lastHighlight: NSRange?
+        var lastHighlightWasSpoken = false
         var pageEffect: PageEffect = .verticalSlide
 
         // Auto-scroll
@@ -704,6 +897,12 @@ struct NativeTextView: UIViewRepresentable {
         // Highlights
         var highlightMode = false
         var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
+        var userHighlights: [Highlight] = []
+
+        // Search
+        var lastSearchQuery = ""
+        var lastSearchResultIndex = 0
+        var searchMatches: [NSRange] = []
 
         init(progress: Binding<Double>, autoScrolling: Binding<Bool>, onTap: @escaping () -> Void) {
             _progress = progress
@@ -749,25 +948,49 @@ struct NativeTextView: UIViewRepresentable {
         func updateHighlight(_ range: NSRange?, in textView: UITextView, color: UIColor) {
             guard !sameRange(range, lastHighlight) else { return }
             let storage = textView.textStorage
-            // Clear previous highlight
-            if let old = lastHighlight, NSMaxRange(old) <= storage.length {
-                storage.removeAttribute(.backgroundColor, range: old)
-            }
             lastHighlight = range
-            // Apply new highlight + scroll it into view
+            guard storage.length > 0 else { return }
+            // Clear ALL background colors from the full text, then reapply user
+            // highlights and the new TTS highlight atomically. This guarantees
+            // exactly one TTS-highlighted region regardless of prior state.
+            let full = NSRange(location: 0, length: storage.length)
+            storage.removeAttribute(.backgroundColor, range: full)
+            for h in userHighlights where NSMaxRange(h.range) <= storage.length {
+                let c = UIColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow)
+                    .withAlphaComponent(0.4)
+                storage.addAttribute(.backgroundColor, value: c, range: h.range)
+            }
             if let r = range, NSMaxRange(r) <= storage.length {
                 storage.addAttribute(.backgroundColor, value: color, range: r)
+                scrollToSentence(r, in: textView)
+                let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
+                lastReportedProgress = v
+                DispatchQueue.main.async { [weak self] in self?.progress = v }
+            }
+        }
+
+        // In vertical-slide mode: smooth-scroll to the highlighted range.
+        // In paper mode: flip to the page containing the range only when
+        // the range is outside the current visible area and no flip is pending.
+        private func scrollToSentence(_ r: NSRange, in textView: UITextView) {
+            if pageEffect == .paper {
+                guard pageTargetY == nil else { return }
+                let lm = textView.layoutManager
+                let tc = textView.textContainer
+                let glyphRange = lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil)
+                let rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+                let sentenceTop = rect.minY + textView.textContainerInset.top
+                let visibleTop = textView.contentOffset.y
+                let visibleBottom = visibleTop + textView.bounds.height
+                if sentenceTop >= visibleBottom {
+                    page(textView, forward: true)
+                } else if rect.maxY + textView.textContainerInset.top < visibleTop {
+                    page(textView, forward: false)
+                }
+            } else {
                 isScrollingProgrammatically = true
                 textView.scrollRangeToVisible(r)
                 isScrollingProgrammatically = false
-                // Follow TTS with the progress bar so closing saves the spoken
-                // position (and reopening + play resumes from there).
-                // Defer the write so it never fires inside updateUIView.
-                if storage.length > 0 {
-                    let v = min(max(Double(r.location) / Double(storage.length), 0), 1)
-                    lastReportedProgress = v
-                    DispatchQueue.main.async { [weak self] in self?.progress = v }
-                }
             }
         }
 
@@ -806,72 +1029,73 @@ struct NativeTextView: UIViewRepresentable {
         // Scroll the text to match an externally-set progress value — initial
         // restore and seeking via the progress bar. Skips values we ourselves
         // reported so it never fights the user's scrolling.
+        // Uses proportional pixel offset throughout — no TextKit layout forced.
         func syncProgress(_ target: Double, in textView: UITextView) {
-            guard pendingRestore == nil else { return }   // initial restore wins
             guard textView.bounds.width > 0, textView.textStorage.length > 0 else { return }
             if let lr = lastReportedProgress, abs(lr - target) < 0.0015 { return }
-            guard abs(charProgress(textView) - target) > 0.003 else { return }
-            // Compute the target offset first — boundingRect forces TextKit to lay
-            // out up to that glyph, so contentSize is accurate before we clamp.
-            let y = offsetForCharProgress(target, in: textView)
+            if isRestorePending {
+                pendingRestoreTarget = target
+                return
+            }
             let maxOffset = max(0, textView.contentSize.height - textView.bounds.height)
-            let clamped = min(max(0, y), maxOffset)
+            let targetY = min(max(0, textView.contentSize.height * target), maxOffset)
+            guard abs(textView.contentOffset.y - targetY) > 1 else { return }
+            guard textView.contentSize.height > textView.bounds.height else { return }
             isScrollingProgrammatically = true
-            textView.setContentOffset(CGPoint(x: 0, y: clamped), animated: false)
+            textView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
             isScrollingProgrammatically = false
         }
 
-        // Restore to a saved position, retrying until the text view is laid out
-        // (on first open the view often has no size / contentSize yet).
-        private var pendingRestore: Double?
-        func scheduleRestore(_ target: Double, in textView: UITextView) {
-            pendingRestore = target
-            attemptRestore(in: textView, retries: 20)
+        private var pendingRestoreTarget: Double?
+        private var isRestorePending = false
+        private var restoreRetries = 0
+
+        private func cancelRestore() {
+            pendingRestoreTarget = nil
+            isRestorePending = false
+            restoreRetries = 0
         }
 
-        private func attemptRestore(in tv: UITextView, retries: Int) {
-            guard let target = pendingRestore else { return }
-            let ready = tv.bounds.width > 0 && tv.textStorage.length > 0
-            if ready {
-                let y = offsetForCharProgress(target, in: tv)   // forces layout to target
-                let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
-                // If we want a non-top position but content isn't tall enough yet,
-                // layout hasn't caught up — retry shortly.
-                if target > 0.001, maxOffset < 1, retries > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                        self?.attemptRestore(in: tv, retries: retries - 1)
-                    }
-                    return
-                }
-                let clamped = min(max(0, y), maxOffset)
-                isScrollingProgrammatically = true
-                tv.setContentOffset(CGPoint(x: 0, y: clamped), animated: false)
-                isScrollingProgrammatically = false
+        func scheduleRestore(_ target: Double, in textView: UITextView) {
+            cancelRestore()
+            pendingRestoreTarget = target
+            isRestorePending = true
+            lastReportedProgress = nil
+        }
 
-                // The offset can be reset to 0 by a layout pass that runs right
-                // after updateUIView; if it didn't stick, retry next runloop.
-                if abs(tv.contentOffset.y - clamped) > 10, retries > 0 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                        self?.attemptRestore(in: tv, retries: retries - 1)
+        // Called from ReaderTextView.layoutSubviews() after super returns.
+        // contentSize may be zero on the first pass while UIKit is still settling.
+        // Retry once via async (no setNeedsLayout — that forces a full re-layout of
+        // the entire TextKit 1 document, which freezes the UI for large books).
+        // After one retry, give up and let syncProgress handle it normally.
+        func didLayout(in tv: UITextView) {
+            guard let target = pendingRestoreTarget else { return }
+            let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+            guard maxOffset > 0 else {
+                if restoreRetries == 0 {
+                    restoreRetries = 1
+                    DispatchQueue.main.async { [weak self, weak tv] in
+                        guard let self, let tv, self.pendingRestoreTarget != nil else { return }
+                        self.didLayout(in: tv)
                     }
-                    return
+                } else {
+                    cancelRestore()
                 }
-                lastReportedProgress = target
-                pendingRestore = nil
-            } else if retries > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                    self?.attemptRestore(in: tv, retries: retries - 1)
-                }
-            } else {
-                pendingRestore = nil
+                return
             }
+            cancelRestore()
+            let clamped = min(max(0, tv.contentSize.height * target), maxOffset)
+            isScrollingProgrammatically = true
+            tv.setContentOffset(CGPoint(x: 0, y: clamped), animated: false)
+            isScrollingProgrammatically = false
+            lastReportedProgress = target
         }
 
         // Update progress only when scrolling settles — writing the binding on
         // every frame re-renders the SwiftUI tree mid-scroll and causes jitter.
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             pageTargetY = nil      // user took over; forget any queued page target
-            pendingRestore = nil   // and cancel any in-flight position restore
+            cancelRestore()   // and cancel any in-flight position restore
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -897,9 +1121,15 @@ struct NativeTextView: UIViewRepresentable {
             guard !isScrollingProgrammatically, let tv = textView else { return }
             guard tv.bounds.width > 0, tv.textStorage.length > 0 else { return }
             let value = charProgress(tv)
-            lastReportedProgress = value   // remember so syncProgress won't bounce back
-            progress = value
+            lastReportedProgress = value
+            DispatchQueue.main.async { [weak self] in self?.progress = value }
         }
+
+        // Fire immediately alongside UITextView's own recognizers — no waiting for their failure.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRequireFailureOf other: UIGestureRecognizer) -> Bool { false }
 
         // Tap zones: left third = page back, right third = page forward, middle = toggle bars.
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
@@ -951,8 +1181,8 @@ struct NativeTextView: UIViewRepresentable {
 
         private var pageTargetY: CGFloat?   // intended offset while a turn animates
 
-        private func page(_ tv: UITextView, forward: Bool) {
-            pendingRestore = nil   // user is navigating — don't let restore reset it
+        func page(_ tv: UITextView, forward: Bool) {
+            cancelRestore()   // user is navigating — don't let restore reset it
             let inset = tv.textContainerInset.top
             let visible = tv.bounds.height
             guard visible > 0 else { return }
@@ -989,7 +1219,7 @@ struct NativeTextView: UIViewRepresentable {
             transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             switch pageEffect {
             case .verticalSlide:
-                transition.subtype = forward ? .fromBottom : .fromTop
+                transition.subtype = forward ? .fromTop : .fromBottom
             case .paper:
                 transition.subtype = forward ? .fromRight : .fromLeft
             }
