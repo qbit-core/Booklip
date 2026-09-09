@@ -309,29 +309,26 @@ struct NativeTextView: NSViewRepresentable {
             return
         }
 
+        // Build the final attributed string with all styles and highlights embedded
+        // before calling setAttributedString — addAttributes on an existing storage
+        // forces a synchronous full-document layout pass on the main thread.
         if let attr = attributedText {
-            let str = NSAttributedString(attr).string
-            if textView.string != str {
-                textView.textStorage?.setAttributedString(NSAttributedString(attr))
+            let base = NSMutableAttributedString(NSAttributedString(attr))
+            base.addAttributes(styleAttrs, range: NSRange(location: 0, length: base.length))
+            for h in highlights where NSMaxRange(h.range) <= base.length {
+                base.addAttribute(.backgroundColor,
+                                  value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
+                                  range: h.range)
             }
-            // Re-apply style attrs for any unstyled ranges (attributed content may lack them).
-            if let storage = textView.textStorage, storage.length > 0 {
-                storage.addAttributes(styleAttrs, range: NSRange(location: 0, length: storage.length))
-            }
+            textView.textStorage?.setAttributedString(base)
         } else if let str = text {
-            // Embed all style (font, color, paragraph style) into the NSAttributedString
-            // before calling setAttributedString. setAttributedString is lazy (layout
-            // invalidated, not forced synchronously), whereas calling addAttributes on an
-            // already-laid-out storage forces a synchronous full-document layout pass.
-            textView.textStorage?.setAttributedString(NSAttributedString(string: str, attributes: styleAttrs))
-        }
-
-        if let storage = textView.textStorage, storage.length > 0 {
-            for h in highlights where NSMaxRange(h.range) <= storage.length {
-                storage.addAttribute(.backgroundColor,
-                                     value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
-                                     range: h.range)
+            let base = NSMutableAttributedString(string: str, attributes: styleAttrs)
+            for h in highlights where NSMaxRange(h.range) <= base.length {
+                base.addAttribute(.backgroundColor,
+                                  value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
+                                  range: h.range)
             }
+            textView.textStorage?.setAttributedString(base)
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
     }
@@ -851,10 +848,13 @@ struct NativeTextView: UIViewRepresentable {
 
     private func applyHighlights(to textView: UITextView) {
         let storage = textView.textStorage
+        guard storage.length > 0, !highlights.isEmpty else { return }
+        storage.beginEditing()
         for h in highlights where NSMaxRange(h.range) <= storage.length {
             let color = UIColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4)
             storage.addAttribute(.backgroundColor, value: color, range: h.range)
         }
+        storage.endEditing()
     }
 
     // Read pixel dimensions from the image file header without decompressing

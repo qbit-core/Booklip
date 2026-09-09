@@ -32,17 +32,15 @@ struct BookCard: View {
                 Text(book.title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Spacer(minLength: 0)
                 Text(book.author)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                ProgressView(value: book.progress)
-                    .tint(.accentColor)
-                    .opacity(book.progress > 0 ? 1 : 0)
+                if book.progress > 0 {
+                    ProgressView(value: book.progress)
+                        .tint(.accentColor)
+                }
             }
-            .frame(height: 62)
         }
         .background(Color(white: 1.0))
         .clipShape(RoundedRectangle(cornerRadius: 12))
