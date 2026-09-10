@@ -1037,6 +1037,26 @@ struct NativeTextView: UIViewRepresentable {
                 pendingRestoreTarget = target
                 return
             }
+
+            let elapsed = Date().timeIntervalSince(lastSeekDate)
+            seekWorkItem?.cancel()
+
+            if elapsed >= seekInterval {
+                lastSeekDate = Date()
+                applySeek(target, in: textView)
+            } else {
+                let remaining = seekInterval - elapsed
+                let work = DispatchWorkItem { [weak self, weak textView] in
+                    guard let self, let tv = textView else { return }
+                    self.lastSeekDate = Date()
+                    self.applySeek(target, in: tv)
+                }
+                seekWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
+            }
+        }
+
+        private func applySeek(_ target: Double, in textView: UITextView) {
             let maxOffset = max(0, textView.contentSize.height - textView.bounds.height)
             let targetY = min(max(0, textView.contentSize.height * target), maxOffset)
             guard abs(textView.contentOffset.y - targetY) > 1 else { return }
@@ -1049,6 +1069,14 @@ struct NativeTextView: UIViewRepresentable {
         private var pendingRestoreTarget: Double?
         private var isRestorePending = false
         private var restoreRetries = 0
+
+        // Throttle: at most one setContentOffset per 50 ms during rapid bar drag.
+        // TextKit 1 must lay out all text up to the new position synchronously on
+        // the main thread — without throttling, every drag event triggers a layout
+        // pass that freezes large documents.
+        private var seekWorkItem: DispatchWorkItem?
+        private var lastSeekDate = Date.distantPast
+        private let seekInterval: TimeInterval = 0.05
 
         private func cancelRestore() {
             pendingRestoreTarget = nil
