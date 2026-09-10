@@ -6,26 +6,28 @@ struct BookCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
-                if let cover = coverImage {
-                    cover
-                        .resizable()
-                        .aspectRatio(2.0/3.0, contentMode: .fill)
-                        .frame(maxWidth: .infinity)
-                        .clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(coverColor)
-                        .aspectRatio(2.0/3.0, contentMode: .fit)   // book-cover ratio, scales with cell width
-                    Text(book.title)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .padding(4)
+                Group {
+                    if let cover = coverImage {
+                        cover
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Rectangle()
+                            .fill(coverColor)
+                            .overlay(alignment: .bottomLeading) {
+                                Text(book.title)
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(.ultraThinMaterial)
+                            }
+                    }
                 }
+                .frame(maxWidth: .infinity)
+                .aspectRatio(2.0/3.0, contentMode: .fit)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 formatBadge
             }
             VStack(alignment: .leading, spacing: 2) {
