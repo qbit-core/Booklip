@@ -6,30 +6,28 @@ struct BookCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
-                Group {
-                    if let cover = coverImage {
-                        cover
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Rectangle()
-                            .fill(coverColor)
-                            .overlay(alignment: .bottomLeading) {
-                                Text(book.title)
-                                    .font(.headline)
-                                    .foregroundStyle(.white)
-                                    .padding(8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(.ultraThinMaterial)
-                            }
-                    }
+                if let cover = coverImage {
+                    cover
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Rectangle()
+                        .fill(coverColor)
+                        .overlay(alignment: .bottomLeading) {
+                            Text(book.title)
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.ultraThinMaterial)
+                        }
                 }
-                .frame(maxWidth: .infinity)
-                .aspectRatio(2.0/3.0, contentMode: .fit)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 8))
                 formatBadge
             }
+            .frame(maxWidth: .infinity)
+            .aspectRatio(2.0/3.0, contentMode: .fit)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 2) {
                 Text(book.title)
                     .font(.subheadline.weight(.semibold))
