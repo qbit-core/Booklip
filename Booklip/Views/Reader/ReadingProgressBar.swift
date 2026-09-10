@@ -3,6 +3,11 @@ import SwiftUI
 struct ReadingProgressBar: View {
     @Binding var progress: Double
     @State private var isDragging = false
+    @State private var dragValue: Double = 0
+
+    // Visual position: own dragValue during drag so charProgress feedback
+    // from the scroll delegate never snaps the thumb back mid-drag.
+    private var displayProgress: Double { isDragging ? dragValue : progress }
 
     var body: some View {
         GeometryReader { geo in
@@ -13,13 +18,13 @@ struct ReadingProgressBar: View {
 
                 Capsule()
                     .fill(Color.accentColor)
-                    .frame(width: geo.size.width * CGFloat(progress), height: isDragging ? 8 : 4)
+                    .frame(width: geo.size.width * CGFloat(displayProgress), height: isDragging ? 8 : 4)
 
                 // Thumb
                 Circle()
                     .fill(Color.accentColor)
                     .frame(width: isDragging ? 20 : 0, height: isDragging ? 20 : 0)
-                    .offset(x: geo.size.width * CGFloat(progress) - (isDragging ? 10 : 0))
+                    .offset(x: geo.size.width * CGFloat(displayProgress) - (isDragging ? 10 : 0))
                     .animation(.easeInOut(duration: 0.15), value: isDragging)
             }
             .frame(height: 20)
@@ -27,8 +32,10 @@ struct ReadingProgressBar: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        if !isDragging { dragValue = progress }
                         isDragging = true
-                        progress = min(max(value.location.x / geo.size.width, 0), 1)
+                        dragValue = min(max(value.location.x / geo.size.width, 0), 1)
+                        progress = dragValue
                     }
                     .onEnded { _ in isDragging = false }
             )

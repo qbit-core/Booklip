@@ -185,6 +185,7 @@ private struct ContinuousPDFView: UIViewRepresentable {
             guard maxOffset > 0 else { return }
             let targetY = min(max(0, target * scrollView.contentSize.height), maxOffset)
             guard abs(scrollView.contentOffset.y - targetY) > 2 else { return }
+            lastReportedProgress = target
             isScrollingProgrammatically = true
             scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
             isScrollingProgrammatically = false
