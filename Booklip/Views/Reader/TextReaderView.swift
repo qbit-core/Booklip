@@ -1131,27 +1131,18 @@ struct NativeTextView: UIViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRequireFailureOf other: UIGestureRecognizer) -> Bool { false }
 
-        // Tap zones: left third = page back, right third = page forward, middle = toggle bars.
+        // Page navigation is handled by SwiftUI tap zones in ReaderView.
+        // This handler only toggles the bars (or lets highlight mode work).
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard let tv = textView, tv.bounds.width > 0 else { onTap(); return }
-            if highlightMode { onTap(); return }   // let selection work; don't page
-            let x = gesture.location(in: tv).x
-            let w = tv.bounds.width
-            if x < w * 0.30 {
-                page(tv, forward: false)
-            } else if x > w * 0.70 {
-                page(tv, forward: true)
-            } else {
-                onTap()
-            }
+            onTap()
         }
 
-        // Swipe right = page forward (like tapping the right), swipe left = back.
+        // Swipe left = next page, swipe right = previous page (standard book convention).
         @objc func handleSwipe(_ gesture: UISwipeGestureRecognizer) {
             guard let tv = textView, tv.bounds.width > 0, !highlightMode else { return }
             switch gesture.direction {
-            case .right: page(tv, forward: true)
-            case .left:  page(tv, forward: false)
+            case .left:  page(tv, forward: true)
+            case .right: page(tv, forward: false)
             default:     break
             }
         }

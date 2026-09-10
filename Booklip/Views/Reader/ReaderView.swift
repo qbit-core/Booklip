@@ -41,7 +41,8 @@ struct ReaderView: View {
                     progress: $vm.progress,
                     showBars: $showBars,
                     pageNavigationDirection: $pageNavigationDirection,
-                    searchQuery: committedSearchQuery
+                    searchQuery: committedSearchQuery,
+                    pageEffect: settings.pageEffect
                 )
             } else {
                 TextReaderView(
@@ -56,6 +57,27 @@ struct ReaderView: View {
                 )
             }
 
+            // Left/right tap zones for page navigation — SwiftUI overlay avoids
+            // UIKit gesture-recognizer conflicts (especially in paper mode where
+            // the scroll view's pan recognizer is disabled).
+            if !showBars && !vm.isLoading && book.format != .pdf {
+                HStack(spacing: 0) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { pageNavigationDirection = -1 }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { showBars = true }
+                        .frame(maxWidth: 80, maxHeight: .infinity)
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { pageNavigationDirection = 1 }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .allowsHitTesting(true)
+            }
+
             if showBars {
                 VStack {
                     topBar
@@ -65,6 +87,13 @@ struct ReaderView: View {
                         bottomBar
                     }
                 }
+                // Tapping the content area while bars are visible hides them
+                .background(
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { showBars = false }
+                        .ignoresSafeArea()
+                )
             }
         }
         .hideNavigationBar()
