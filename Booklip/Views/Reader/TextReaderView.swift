@@ -1038,6 +1038,11 @@ struct NativeTextView: UIViewRepresentable {
                 return
             }
 
+            // Record that bar is actively driving position — commitProgress checks
+            // this to avoid overwriting vm.progress during an active drag.
+            lastSyncDate = Date()
+            latestSeekTarget = target
+
             let elapsed = Date().timeIntervalSince(lastSeekDate)
             seekWorkItem?.cancel()
 
@@ -1046,10 +1051,13 @@ struct NativeTextView: UIViewRepresentable {
                 applySeek(target, in: textView)
             } else {
                 let remaining = seekInterval - elapsed
+                // Work item reads latestSeekTarget, not captured target, so it
+                // always applies the most-recent bar position even if several
+                // drag events fire before the work item executes.
                 let work = DispatchWorkItem { [weak self, weak textView] in
                     guard let self, let tv = textView else { return }
                     self.lastSeekDate = Date()
-                    self.applySeek(target, in: tv)
+                    self.applySeek(self.latestSeekTarget, in: tv)
                 }
                 seekWorkItem = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
@@ -1076,6 +1084,8 @@ struct NativeTextView: UIViewRepresentable {
         // pass that freezes large documents.
         private var seekWorkItem: DispatchWorkItem?
         private var lastSeekDate = Date.distantPast
+        private var latestSeekTarget: Double = 0   // always holds the most-recent target
+        private var lastSyncDate = Date.distantPast // tracks when bar drag last fired
         private let seekInterval: TimeInterval = 0.05
 
         private func cancelRestore() {
@@ -1148,6 +1158,9 @@ struct NativeTextView: UIViewRepresentable {
         private func commitProgress(_ scrollView: UIScrollView) {
             guard !isScrollingProgrammatically, let tv = textView else { return }
             guard tv.bounds.width > 0, tv.textStorage.length > 0 else { return }
+            // If the progress bar was moved recently, don't let the scroll-position
+            // commit overwrite vm.progress — that would snap the bar back mid-drag.
+            guard Date().timeIntervalSince(lastSyncDate) > 0.3 else { return }
             let value = charProgress(tv)
             lastReportedProgress = value
             DispatchQueue.main.async { [weak self] in self?.progress = value }
