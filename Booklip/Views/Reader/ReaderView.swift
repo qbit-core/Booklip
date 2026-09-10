@@ -60,7 +60,7 @@ struct ReaderView: View {
             // Left/right tap zones for page navigation — SwiftUI overlay avoids
             // UIKit gesture-recognizer conflicts (especially in paper mode where
             // the scroll view's pan recognizer is disabled).
-            if !showBars && !vm.isLoading && book.format != .pdf {
+            if !showBars && !vm.isLoading && (book.format != .pdf || settings.pageEffect == .paper) {
                 HStack(spacing: 0) {
                     Color.clear
                         .contentShape(Rectangle())

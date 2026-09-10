@@ -60,20 +60,23 @@ private struct ContinuousPDFView: UIViewRepresentable {
         coord.onTap = onTap
 
         let isPaper = pageEffect == .paper
-        scrollView.isScrollEnabled = !isPaper
+        // In paper mode pages fill the screen; isPagingEnabled snaps between them
+        scrollView.isPagingEnabled = isPaper
+        scrollView.isScrollEnabled = true
         scrollView.showsVerticalScrollIndicator = !isPaper
 
-        if coord.document == nil, let doc = document {
+        // Rebuild pages when pageEffect changes so sizing is correct
+        if coord.document == nil || coord.currentPageEffect != pageEffect, let doc = document {
+            coord.currentPageEffect = pageEffect
             coord.buildPages(doc, in: scrollView)
         }
 
-        // Page navigation from toolbar buttons
+        // Page navigation from tap zones / keyboard
         let dir = pageNavigationDirection
         if dir != 0 {
             coord.navigatePage(dir, in: scrollView)
             DispatchQueue.main.async { pageNavigationDirection = 0 }
         } else {
-            // Seek from progress bar
             coord.seek(to: progress, in: scrollView)
         }
     }
@@ -85,9 +88,11 @@ private struct ContinuousPDFView: UIViewRepresentable {
         weak var scrollView: UIScrollView?
         var document: PDFDocument?
         var pageViews: [UIImageView] = []
-        var pageHeights: [CGFloat] = []
+        // page offsets (top-Y of each page in the scroll view content)
+        var pageOffsets: [CGFloat] = []
         var isScrollingProgrammatically = false
         var lastReportedProgress: Double?
+        var currentPageEffect: PageEffect = .verticalSlide
         private let pageSpacing: CGFloat = 8
 
         init(progress: Binding<Double>, pageNavigationDirection: Binding<Int>, onTap: @escaping () -> Void) {
@@ -99,53 +104,74 @@ private struct ContinuousPDFView: UIViewRepresentable {
         func buildPages(_ doc: PDFDocument, in scrollView: UIScrollView) {
             document = doc
             pageViews.forEach { $0.removeFromSuperview() }
+            // Remove old container subviews
+            scrollView.subviews.forEach { $0.removeFromSuperview() }
             pageViews = []
-            pageHeights = []
+            pageOffsets = []
 
-            let width = max(scrollView.bounds.width, UIScreen.main.bounds.width)
+            let screenBounds = UIScreen.main.bounds
+            let width = max(scrollView.bounds.width, screenBounds.width)
+            let screenHeight = max(scrollView.bounds.height, screenBounds.height)
+            let isPaper = currentPageEffect == .paper
+
             let container = UIView()
             container.backgroundColor = .clear
             scrollView.addSubview(container)
 
-            var y: CGFloat = pageSpacing
+            var y: CGFloat = 0
             for i in 0..<doc.pageCount {
                 guard let page = doc.page(at: i) else { continue }
                 let pageRect = page.bounds(for: .mediaBox)
-                let scale = width / pageRect.width
-                let height = pageRect.height * scale
 
                 let imageView = UIImageView()
                 imageView.contentMode = .scaleAspectFit
                 imageView.backgroundColor = .white
-                imageView.frame = CGRect(x: 0, y: y, width: width, height: height)
+
+                let frameHeight: CGFloat
+                let renderSize: CGSize
+                let renderScale: CGFloat
+
+                if isPaper {
+                    // Each page occupies exactly one screen height
+                    frameHeight = screenHeight
+                    let scaleW = width / pageRect.width
+                    let scaleH = screenHeight / pageRect.height
+                    renderScale = min(scaleW, scaleH)
+                    renderSize = CGSize(width: pageRect.width * renderScale,
+                                       height: pageRect.height * renderScale)
+                } else {
+                    renderScale = width / pageRect.width
+                    renderSize = CGSize(width: width, height: pageRect.height * renderScale)
+                    frameHeight = renderSize.height
+                }
+
+                imageView.frame = CGRect(x: 0, y: y, width: width, height: frameHeight)
                 container.addSubview(imageView)
                 pageViews.append(imageView)
-                pageHeights.append(height + pageSpacing)
+                pageOffsets.append(y)
 
-                // Render page on background thread
                 let capturedPage = page
-                let capturedSize = CGSize(width: width, height: height)
+                let capturedRenderSize = renderSize
+                let capturedRenderScale = renderScale
                 DispatchQueue.global(qos: .userInitiated).async { [weak imageView] in
-                    let renderer = UIGraphicsImageRenderer(size: capturedSize)
+                    let renderer = UIGraphicsImageRenderer(size: capturedRenderSize)
                     let img = renderer.image { ctx in
                         UIColor.white.setFill()
-                        ctx.fill(CGRect(origin: .zero, size: capturedSize))
-                        ctx.cgContext.translateBy(x: 0, y: capturedSize.height)
+                        ctx.fill(CGRect(origin: .zero, size: capturedRenderSize))
+                        ctx.cgContext.translateBy(x: 0, y: capturedRenderSize.height)
                         ctx.cgContext.scaleBy(x: 1, y: -1)
-                        ctx.cgContext.scaleBy(x: scale, y: scale)
+                        ctx.cgContext.scaleBy(x: capturedRenderScale, y: capturedRenderScale)
                         capturedPage.draw(with: .mediaBox, to: ctx.cgContext)
                     }
                     DispatchQueue.main.async { imageView?.image = img }
                 }
 
-                y += height + pageSpacing
+                y += frameHeight + (isPaper ? 0 : pageSpacing)
             }
 
             container.frame = CGRect(x: 0, y: 0, width: width, height: y)
             scrollView.contentSize = CGSize(width: width, height: y)
-            container.autoresizingMask = []
 
-            // Seek to saved progress after layout
             DispatchQueue.main.async { [weak self, weak scrollView] in
                 guard let self, let sv = scrollView else { return }
                 self.seek(to: self.progress, in: sv)
@@ -165,27 +191,22 @@ private struct ContinuousPDFView: UIViewRepresentable {
         }
 
         func navigatePage(_ direction: Int, in scrollView: UIScrollView) {
-            guard !pageHeights.isEmpty else { return }
+            guard !pageOffsets.isEmpty else { return }
             let currentY = scrollView.contentOffset.y
 
-            // Find which page is currently shown
-            var cumulative: CGFloat = pageSpacing
-            var currentPageIndex = 0
-            for (i, h) in pageHeights.enumerated() {
-                if currentY < cumulative + h { currentPageIndex = i; break }
-                cumulative += h
-                currentPageIndex = i
+            // Find the page currently at or just past the top of the viewport
+            var currentIndex = 0
+            for (i, offset) in pageOffsets.enumerated() {
+                if offset <= currentY + 1 { currentIndex = i }
             }
 
-            let targetIndex = max(0, min(pageHeights.count - 1, currentPageIndex + direction))
-
-            // Compute Y offset for targetIndex
-            var targetY: CGFloat = pageSpacing
-            for i in 0..<targetIndex { targetY += pageHeights[i] }
-
+            let targetIndex = max(0, min(pageOffsets.count - 1, currentIndex + direction))
+            var targetY = pageOffsets[targetIndex]
             let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+            targetY = min(targetY, maxOffset)
+
             isScrollingProgrammatically = true
-            scrollView.setContentOffset(CGPoint(x: 0, y: min(targetY, maxOffset)), animated: true)
+            scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
             isScrollingProgrammatically = false
         }
 
