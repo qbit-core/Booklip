@@ -1041,9 +1041,6 @@ struct NativeTextView: UIViewRepresentable {
             let targetY = min(max(0, textView.contentSize.height * target), maxOffset)
             guard abs(textView.contentOffset.y - targetY) > 1 else { return }
             guard textView.contentSize.height > textView.bounds.height else { return }
-            // Mark the target as reported so a deferred charProgress commit
-            // (from a prior scrollViewDidEnd* callback) cannot revert this scroll.
-            lastReportedProgress = target
             isScrollingProgrammatically = true
             textView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
             isScrollingProgrammatically = false
