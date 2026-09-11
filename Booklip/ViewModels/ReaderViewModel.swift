@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import PDFKit
+import os.signpost
 
 // Sendable struct — completely nonisolated, safe to use off the main actor.
 private struct BookLoader: Sendable {
@@ -16,7 +17,7 @@ private struct BookLoader: Sendable {
                 options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
             )) ?? AttributedString("")
         }
-        print("[ReaderVM] parsed \(parsed.plainText.count) chars, \(parsed.blocks.count) blocks, \(parsed.embeddedFonts.count) fonts, \(parsed.chapters.count) chapters")
+        print("[ReaderVM] parsed \((parsed.plainText as NSString).length) utf16, \(parsed.blocks.count) blocks, \(parsed.embeddedFonts.count) fonts, \(parsed.chapters.count) chapters")
         return (parsed.plainText, attributed, parsed.blocks, parsed.embeddedFonts, parsed.chapters)
     }
 }
@@ -100,9 +101,17 @@ class ReaderViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
+        // Open-EndToEnd: file selected → didLayout complete (end fires in Coordinator.didLayout).
+        let e2eID = OSSignpostID(log: booklipSpLog)
+        OpenSignpostState.shared.endToEndID = e2eID
+        os_signpost(.begin, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
+                    "format=%{public}s", book.format.rawValue)
+        let _e2eStart = CFAbsoluteTimeGetCurrent()
+        OpenSignpostState.shared.endToEndT0 = _e2eStart
+
         let fileURL = book.fileURL
         let format = book.format
-        print("[ReaderVM] load format=\(format) exists=\(FileManager.default.fileExists(atPath: fileURL.path))")
+        print("[TIME] Open-EndToEnd BEGIN format=\(format)")
 
         // Use a continuation so the background work runs at the same QoS
         // as the caller (user-interactive), avoiding priority inversion.
@@ -123,6 +132,10 @@ class ReaderViewModel: ObservableObject {
                 plainText = result.1
             } else {
                 let loader = BookLoader(url: fileURL, format: format)
+                let vmLoadID = OSSignpostID(log: booklipSpLog)
+                os_signpost(.begin, log: booklipSpLog, name: "Open-VMLoad", signpostID: vmLoadID,
+                            "url=%{public}s", fileURL.lastPathComponent)
+                let _vmStart = CFAbsoluteTimeGetCurrent()
                 let (text, attr, parsedBlocks, fonts, parsedChapters): (String, AttributedString, [ContentBlock], [Data], [Chapter]) = try await withCheckedThrowingContinuation { continuation in
                     DispatchQueue.global(qos: .userInteractive).async {
                         do {
@@ -132,6 +145,10 @@ class ReaderViewModel: ObservableObject {
                         }
                     }
                 }
+                os_signpost(.end, log: booklipSpLog, name: "Open-VMLoad", signpostID: vmLoadID,
+                            "chars=%d blocks=%d", (text as NSString).length, parsedBlocks.count)
+                print(String(format: "[TIME] Open-VMLoad %.0f ms  utf16=%d blocks=%d",
+                             (CFAbsoluteTimeGetCurrent() - _vmStart) * 1000, (text as NSString).length, parsedBlocks.count))
                 plainText = text
                 attributedText = attr
                 blocks = parsedBlocks
@@ -144,7 +161,7 @@ class ReaderViewModel: ObservableObject {
         }
 
         isLoading = false
-        print("[ReaderVM] done isLoading=false text.count=\(plainText.count)")
+        print("[ReaderVM] done isLoading=false utf16=\((plainText as NSString).length)")
     }
 
     func updateProgress(_ value: Double) {

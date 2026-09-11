@@ -8,10 +8,20 @@ enum BookStore {
     private static let folderKey  = "savedFolders"
 
     static func load() -> [Book] {
-        guard let data = UserDefaults.standard.data(forKey: listKey),
-              let books = try? JSONDecoder().decode([Book].self, from: data)
-        else { return [] }
-        return books
+        guard let data = UserDefaults.standard.data(forKey: listKey) else { return [] }
+        let decoder = JSONDecoder()
+        // Fast path: all books decode successfully.
+        if let books = try? decoder.decode([Book].self, from: data) { return books }
+        // Fallback: decode each element individually so a single corrupt entry
+        // (e.g. from a schema mismatch) does not wipe the entire library.
+        if let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            let recovered = raw.compactMap { dict -> Book? in
+                guard let elem = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+                return try? decoder.decode(Book.self, from: elem)
+            }
+            if !recovered.isEmpty { return recovered }
+        }
+        return []
     }
 
     static func save(_ books: [Book]) {
@@ -36,6 +46,11 @@ enum BookStore {
     static func delete(book: Book) {
         try? FileManager.default.removeItem(at: book.fileURL)
         if let cover = book.coverURL { try? FileManager.default.removeItem(at: cover) }
+        let id = book.id.uuidString
+        let ud = UserDefaults.standard
+        ud.removeObject(forKey: "settings_\(id)")
+        ud.removeObject(forKey: bookmarkKey(book.id))
+        ud.removeObject(forKey: "highlights_\(id)")
     }
 
     // Saves cover image data and returns its file name.
@@ -95,10 +110,17 @@ enum BookStore {
     }
 
     static func loadFolders() -> [BookFolder] {
-        guard let data = UserDefaults.standard.data(forKey: folderKey),
-              let folders = try? JSONDecoder().decode([BookFolder].self, from: data)
-        else { return [] }
-        return folders
+        guard let data = UserDefaults.standard.data(forKey: folderKey) else { return [] }
+        let decoder = JSONDecoder()
+        if let folders = try? decoder.decode([BookFolder].self, from: data) { return folders }
+        if let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            let recovered = raw.compactMap { dict -> BookFolder? in
+                guard let elem = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+                return try? decoder.decode(BookFolder.self, from: elem)
+            }
+            if !recovered.isEmpty { return recovered }
+        }
+        return []
     }
 
     static func saveFolders(_ folders: [BookFolder]) {

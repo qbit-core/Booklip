@@ -79,4 +79,38 @@ struct Book: Identifiable, Codable {
     var coverURL: URL? {
         coverFileName.map { BookStore.documentsDirectory.appendingPathComponent($0) }
     }
+
+    // Custom Codable so that fields added in later versions (wordCount, dateAdded,
+    // folderID, coverFileName, progressUpdated…) are decoded with decodeIfPresent.
+    // Swift's auto-synthesised init(from:) calls decode(_:forKey:) — not
+    // decodeIfPresent — even for properties that have a Swift default value, so any
+    // field that is absent in old stored data causes the entire decode to throw and
+    // BookStore.load() silently returns [].  Using decodeIfPresent + a default for
+    // every non-essential field prevents that silent wipe on update.
+    enum CodingKeys: String, CodingKey {
+        case id, title, author, format, fileName, progress
+        case dateAdded, wordCount, folderID, coverFileName, progressUpdated
+    }
+
+    init(title: String, author: String = "Unknown", format: BookFormat, fileName: String) {
+        self.title = title
+        self.author = author
+        self.format = format
+        self.fileName = fileName
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id            = try c.decodeIfPresent(UUID.self,   forKey: .id)            ?? UUID()
+        title         = try c.decode(String.self,          forKey: .title)
+        author        = try c.decodeIfPresent(String.self, forKey: .author)        ?? "Unknown"
+        format        = try c.decode(BookFormat.self,      forKey: .format)
+        fileName      = try c.decode(String.self,          forKey: .fileName)
+        progress      = try c.decodeIfPresent(Double.self, forKey: .progress)      ?? 0.0
+        dateAdded     = try c.decodeIfPresent(Date.self,   forKey: .dateAdded)     ?? Date()
+        wordCount     = try c.decodeIfPresent(Int.self,    forKey: .wordCount)     ?? 0
+        folderID      = try c.decodeIfPresent(UUID.self,   forKey: .folderID)
+        coverFileName = try c.decodeIfPresent(String.self, forKey: .coverFileName)
+        progressUpdated = try c.decodeIfPresent(Date.self, forKey: .progressUpdated)
+    }
 }

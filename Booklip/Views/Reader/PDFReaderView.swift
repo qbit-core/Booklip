@@ -60,9 +60,10 @@ private struct ContinuousPDFView: UIViewRepresentable {
         coord.onTap = onTap
 
         let isPaper = pageEffect == .paper
-        // In paper mode pages fill the screen; isPagingEnabled snaps between them
-        scrollView.isPagingEnabled = isPaper
-        scrollView.isScrollEnabled = true
+        // In paper mode disable user scrolling — page turns are driven by
+        // navigatePage() with a CATransition, matching EPUB paper mode behaviour.
+        scrollView.isPagingEnabled = false
+        scrollView.isScrollEnabled = !isPaper
         scrollView.showsVerticalScrollIndicator = !isPaper
 
         // Rebuild pages when pageEffect changes so sizing is correct
@@ -201,13 +202,31 @@ private struct ContinuousPDFView: UIViewRepresentable {
             }
 
             let targetIndex = max(0, min(pageOffsets.count - 1, currentIndex + direction))
+            guard targetIndex != currentIndex else { return }
             var targetY = pageOffsets[targetIndex]
             let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
             targetY = min(targetY, maxOffset)
 
             isScrollingProgrammatically = true
-            scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
-            isScrollingProgrammatically = false
+            if currentPageEffect == .paper {
+                // Horizontal push transition — matches EPUB paper mode behaviour.
+                let transition = CATransition()
+                transition.duration = 0.35
+                transition.type = .push
+                transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                transition.subtype = direction > 0 ? .fromRight : .fromLeft
+                CATransaction.begin()
+                CATransaction.setCompletionBlock { [weak self, weak scrollView] in
+                    self?.isScrollingProgrammatically = false
+                    if let sv = scrollView { self?.commitProgress(sv) }
+                }
+                scrollView.layer.add(transition, forKey: "pageTurn")
+                scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
+                CATransaction.commit()
+            } else {
+                scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
+                isScrollingProgrammatically = false
+            }
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate: Bool) {

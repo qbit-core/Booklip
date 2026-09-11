@@ -1,21 +1,31 @@
 import Foundation
 import ZIPFoundation
 import CryptoKit
+import os.signpost
 
 struct EPUBParser: BookParser, Sendable {
+
     nonisolated init() {}
     nonisolated static func run(url: URL) throws -> ParsedBook { try EPUBParser().parse(url: url) }
     nonisolated func parse(url: URL) throws -> ParsedBook {
+        // Open-Unzip: archive open + OPF metadata read.
+        let unzipID = OSSignpostID(log: booklipSpLog)
+        os_signpost(.begin, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
+                    "file=%{public}s", url.lastPathComponent)
         let archive: Archive
         do {
             archive = try Archive(url: url, accessMode: .read)
         } catch {
+            os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
+                        "status=failed")
             throw EPUBError.cannotOpenArchive
         }
 
         let containerXML = try readEntry("META-INF/container.xml", in: archive)
         let opfPath = try extractOPFPath(from: containerXML)
         let opfXML = try readEntry(opfPath, in: archive)
+        os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
+                    "status=ok opfPath=%{public}s", opfPath)
 
         let opfBase = (opfPath as NSString).deletingLastPathComponent
         let opf = try parseOPF(opfXML, base: opfBase)
@@ -35,6 +45,12 @@ struct EPUBParser: BookParser, Sendable {
         var blocks: [ContentBlock] = []
         var chapterMarks: [(title: String, offset: Int)] = []
         var hrefToOffset: [String: Int] = [:]   // spine href (no fragment) → start offset
+
+        // Open-ParseHTML: per-chapter HTML extraction, stripHTML, image data read.
+        let parseID = OSSignpostID(log: booklipSpLog)
+        os_signpost(.begin, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
+                    "spine=%d", spineHrefs.count)
+        var imageBlockCount = 0
 
         for (i, href) in spineHrefs.enumerated() {
             let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
@@ -63,10 +79,14 @@ struct EPUBParser: BookParser, Sendable {
                     let imgPath = resolvePath(src, relativeTo: chapterDir)
                     if let data = try? readData(imgPath, in: archive), !data.isEmpty {
                         blocks.append(.image(data))
+                        imageBlockCount += 1
                     }
                 }
             }
         }
+        os_signpost(.end, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
+                    "chars=%d blocks=%d images=%d",
+                    (fullText as NSString).length, blocks.count, imageBlockCount)
 
         let totalLen = max(1, (fullText as NSString).length)
 
