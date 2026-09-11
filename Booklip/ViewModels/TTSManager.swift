@@ -169,50 +169,23 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Sentence segmentation
 
-    /// Splits `text` into sentence ranges using a direct character scan.
-    /// Handles regular spaces, tabs, and non-breaking spaces (U+00A0) after
-    /// sentence-ending punctuation, avoiding all regex-compilation edge cases.
+    /// Splits `text` into sentence ranges using NLTokenizer.
+    /// Correctly handles Korean full-width punctuation (。？！), quoted sentences,
+    /// and mixed-language text — all cases the previous ASCII-only scan missed.
     private func makeSentenceRanges(in text: String) -> [NSRange] {
-        let ns = text as NSString
-        let total = ns.length
-        guard total > 0 else { return [NSRange(location: 0, length: total)] }
-
-        var starts: [Int] = [0]
-        var i = 0
-        while i < total {
-            let c = ns.character(at: i)
-            // Sentence-ending punctuation: . (0x2E) ? (0x3F) ! (0x21)
-            guard c == 0x2E || c == 0x3F || c == 0x21 else { i += 1; continue }
-
-            var j = i + 1
-            // Skip optional closing quote: " (U+201D) ' (U+2019) " (0x22) ' (0x27)
-            if j < total {
-                let q = ns.character(at: j)
-                if q == 0x201D || q == 0x2019 || q == 0x22 || q == 0x27 { j += 1 }
-            }
-            // Require 1+ whitespace: space (0x20), tab (0x09), NBSP (0x00A0)
-            let spaceStart = j
-            while j < total {
-                let sp = ns.character(at: j)
-                if sp == 0x20 || sp == 0x09 || sp == 0x00A0 { j += 1 } else { break }
-            }
-            guard j > spaceStart, j < total else { i += 1; continue }
-
-            // Next char: uppercase A-Z or opening quote " (U+201C) ' (U+2018) " '
-            let next = ns.character(at: j)
-            let isUpper  = next >= 0x41 && next <= 0x5A
-            let isOpenQ  = next == 0x201C || next == 0x2018 || next == 0x22 || next == 0x27
-            if isUpper || isOpenQ { starts.append(j) }
-            i += 1
-        }
-        starts.append(total)
-
+        guard !text.isEmpty else { return [NSRange(location: 0, length: 0)] }
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
         var result: [NSRange] = []
-        for k in 0..<starts.count - 1 {
-            let s = starts[k], e = starts[k + 1]
-            if e > s { result.append(NSRange(location: s, length: e - s)) }
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let nsRange = NSRange(range, in: text)
+            if nsRange.length > 0 { result.append(nsRange) }
+            return true
         }
-        return result.isEmpty ? [NSRange(location: 0, length: total)] : result
+        if result.isEmpty {
+            result.append(NSRange(location: 0, length: (text as NSString).length))
+        }
+        return result
     }
 
     // MARK: - Playback

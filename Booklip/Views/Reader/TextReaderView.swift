@@ -647,15 +647,25 @@ struct NativeTextView: UIViewRepresentable {
         let colorChanged = context.coordinator.lastColorKey != colorKey
 
         if layoutChanged {
+            // scheduleRestore must be called BEFORE applyContent (specifically before
+            // setAttributedString). For EPUB/markdown the setAttributedString call is
+            // synchronous and immediately triggers layoutSubviews → onDidLayout (one
+            // async tick later). If pendingRestoreTarget is nil at that point, didLayout
+            // returns early and no further layout event re-fires it — the view stays at
+            // the top regardless of book.progress. Setting pendingRestoreTarget first
+            // ensures didLayout sees it when it fires from the layout triggered by
+            // setAttributedString. For plain-text the task is async so the order matters
+            // less, but consistency is correct in both cases.
+            context.coordinator.scheduleRestore(progress, in: textView, afterLayoutChange: true)
+            context.coordinator.lastLayoutKey = layoutKey
+            context.coordinator.lastColorKey = colorKey
+            context.coordinator.lastContentKey = contentKey
             let _applyT0 = CFAbsoluteTimeGetCurrent()
             applyContent(to: textView, coordinator: context.coordinator)
             print(String(format: "[TIME] layoutChanged-applyContent %.0f ms  layout=%@ content=%@",
                          (CFAbsoluteTimeGetCurrent() - _applyT0) * 1000,
                          layoutKey as NSString, contentKey as NSString))
             textView.backgroundColor = UIColor(settings.currentPreset.background)
-            context.coordinator.lastLayoutKey = layoutKey
-            context.coordinator.lastColorKey = colorKey
-            context.coordinator.lastContentKey = contentKey
             // EPUB: stableCharCount must match textStorage.length (which includes
             // U+FFFC attachment chars) so that charIdx computed in applySeek stays
             // within [0, textStorage.length).
@@ -669,7 +679,6 @@ struct NativeTextView: UIViewRepresentable {
                     Int($0.progress * Double(actualLength))
                 }
             }
-            context.coordinator.scheduleRestore(progress, in: textView, afterLayoutChange: true)
         } else if colorChanged {
             applyColorOnly(to: textView)
             textView.backgroundColor = UIColor(settings.currentPreset.background)

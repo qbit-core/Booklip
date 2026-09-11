@@ -15,6 +15,7 @@ struct PDFReaderView: View {
             document: document,
             progress: $progress,
             pageNavigationDirection: $pageNavigationDirection,
+            searchQuery: searchQuery,
             pageEffect: pageEffect,
             onTap: { showBars.toggle() }
         )
@@ -30,6 +31,7 @@ private struct ContinuousPDFView: UIViewRepresentable {
     let document: PDFDocument?
     @Binding var progress: Double
     @Binding var pageNavigationDirection: Int
+    var searchQuery: String = ""
     var pageEffect: PageEffect = .verticalSlide
     var onTap: () -> Void = {}
 
@@ -60,16 +62,22 @@ private struct ContinuousPDFView: UIViewRepresentable {
         coord.onTap = onTap
 
         let isPaper = pageEffect == .paper
-        // In paper mode disable user scrolling — page turns are driven by
-        // navigatePage() with a CATransition, matching EPUB paper mode behaviour.
         scrollView.isPagingEnabled = false
         scrollView.isScrollEnabled = !isPaper
         scrollView.showsVerticalScrollIndicator = !isPaper
 
-        // Rebuild pages when pageEffect changes so sizing is correct
+        // Rebuild pages when document or pageEffect changes
         if coord.document == nil || coord.currentPageEffect != pageEffect, let doc = document {
             coord.currentPageEffect = pageEffect
             coord.buildPages(doc, in: scrollView)
+        }
+
+        // PDF in-book search: find matches, jump to first hit
+        if coord.lastSearchQuery != searchQuery {
+            coord.lastSearchQuery = searchQuery
+            if let doc = document {
+                coord.applySearch(query: searchQuery, in: doc, scrollView: scrollView)
+            }
         }
 
         // Page navigation from tap zones / keyboard
@@ -82,6 +90,9 @@ private struct ContinuousPDFView: UIViewRepresentable {
         }
     }
 
+    // Number of pages rendered on each side of the visible page (window = 1+2*radius).
+    static let renderRadius = 3
+
     class Coordinator: NSObject, UIScrollViewDelegate {
         @Binding var progress: Double
         @Binding var pageNavigationDirection: Int
@@ -89,11 +100,16 @@ private struct ContinuousPDFView: UIViewRepresentable {
         weak var scrollView: UIScrollView?
         var document: PDFDocument?
         var pageViews: [UIImageView] = []
-        // page offsets (top-Y of each page in the scroll view content)
         var pageOffsets: [CGFloat] = []
+        // Render metadata stored per page so renderWindow can (re-)render on demand.
+        struct PageMeta { let page: PDFPage; let renderSize: CGSize; let renderScale: CGFloat }
+        var pageMetas: [PageMeta] = []
         var isScrollingProgrammatically = false
         var lastReportedProgress: Double?
         var currentPageEffect: PageEffect = .verticalSlide
+        var lastSearchQuery: String = ""
+        // Highlight overlays for search results (one per page that has a match).
+        private var searchOverlays: [UIView] = []
         private let pageSpacing: CGFloat = 8
 
         init(progress: Binding<Double>, pageNavigationDirection: Binding<Int>, onTap: @escaping () -> Void) {
@@ -105,10 +121,11 @@ private struct ContinuousPDFView: UIViewRepresentable {
         func buildPages(_ doc: PDFDocument, in scrollView: UIScrollView) {
             document = doc
             pageViews.forEach { $0.removeFromSuperview() }
-            // Remove old container subviews
             scrollView.subviews.forEach { $0.removeFromSuperview() }
             pageViews = []
             pageOffsets = []
+            pageMetas = []
+            searchOverlays = []
 
             let screenBounds = UIScreen.main.bounds
             let width = max(scrollView.bounds.width, screenBounds.width)
@@ -133,7 +150,6 @@ private struct ContinuousPDFView: UIViewRepresentable {
                 let renderScale: CGFloat
 
                 if isPaper {
-                    // Each page occupies exactly one screen height
                     frameHeight = screenHeight
                     let scaleW = width / pageRect.width
                     let scaleH = screenHeight / pageRect.height
@@ -150,22 +166,7 @@ private struct ContinuousPDFView: UIViewRepresentable {
                 container.addSubview(imageView)
                 pageViews.append(imageView)
                 pageOffsets.append(y)
-
-                let capturedPage = page
-                let capturedRenderSize = renderSize
-                let capturedRenderScale = renderScale
-                DispatchQueue.global(qos: .userInitiated).async { [weak imageView] in
-                    let renderer = UIGraphicsImageRenderer(size: capturedRenderSize)
-                    let img = renderer.image { ctx in
-                        UIColor.white.setFill()
-                        ctx.fill(CGRect(origin: .zero, size: capturedRenderSize))
-                        ctx.cgContext.translateBy(x: 0, y: capturedRenderSize.height)
-                        ctx.cgContext.scaleBy(x: 1, y: -1)
-                        ctx.cgContext.scaleBy(x: capturedRenderScale, y: capturedRenderScale)
-                        capturedPage.draw(with: .mediaBox, to: ctx.cgContext)
-                    }
-                    DispatchQueue.main.async { imageView?.image = img }
-                }
+                pageMetas.append(PageMeta(page: page, renderSize: renderSize, renderScale: renderScale))
 
                 y += frameHeight + (isPaper ? 0 : pageSpacing)
             }
@@ -176,8 +177,119 @@ private struct ContinuousPDFView: UIViewRepresentable {
             DispatchQueue.main.async { [weak self, weak scrollView] in
                 guard let self, let sv = scrollView else { return }
                 self.seek(to: self.progress, in: sv)
+                // Render the window around the initial position after layout is stable.
+                self.renderWindow(around: self.currentPageIndex(in: sv))
             }
         }
+
+        // MARK: - Lazy rendering
+
+        // Render pages in [index-radius, index+radius]; cancel/clear pages outside.
+        func renderWindow(around center: Int) {
+            let radius = ContinuousPDFView.renderRadius
+            for i in 0..<pageViews.count {
+                let imageView = pageViews[i]
+                if abs(i - center) <= radius {
+                    guard imageView.image == nil else { continue }
+                    let meta = pageMetas[i]
+                    DispatchQueue.global(qos: .userInitiated).async { [weak imageView] in
+                        let renderer = UIGraphicsImageRenderer(size: meta.renderSize)
+                        let img = renderer.image { ctx in
+                            UIColor.white.setFill()
+                            ctx.fill(CGRect(origin: .zero, size: meta.renderSize))
+                            ctx.cgContext.translateBy(x: 0, y: meta.renderSize.height)
+                            ctx.cgContext.scaleBy(x: 1, y: -1)
+                            ctx.cgContext.scaleBy(x: meta.renderScale, y: meta.renderScale)
+                            meta.page.draw(with: .mediaBox, to: ctx.cgContext)
+                        }
+                        DispatchQueue.main.async { imageView?.image = img }
+                    }
+                } else {
+                    // Evict pages far from the window to reclaim memory.
+                    imageView.image = nil
+                }
+            }
+        }
+
+        private func currentPageIndex(in scrollView: UIScrollView) -> Int {
+            let midY = scrollView.contentOffset.y + scrollView.bounds.height / 2
+            var best = 0
+            var bestDist = CGFloat.greatestFiniteMagnitude
+            for (i, offset) in pageOffsets.enumerated() {
+                let dist = abs(offset - midY)
+                if dist < bestDist { bestDist = dist; best = i }
+            }
+            return best
+        }
+
+        // MARK: - Search
+
+        func applySearch(query: String, in doc: PDFDocument, scrollView: UIScrollView) {
+            // Remove existing overlays
+            searchOverlays.forEach { $0.removeFromSuperview() }
+            searchOverlays = []
+            guard !query.isEmpty else { return }
+
+            // PDFDocument.findString is synchronous — run on background to avoid blocking main thread.
+            let capturedDoc = doc
+            let capturedQuery = query
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak scrollView] in
+                guard let self else { return }
+                let selections = capturedDoc.findString(capturedQuery, withOptions: .caseInsensitive)
+                guard !selections.isEmpty else { return }
+                DispatchQueue.main.async { [weak self, weak scrollView] in
+                    guard let self, let sv = scrollView else { return }
+                    self.highlightSearchResults(selections, in: capturedDoc, scrollView: sv)
+                }
+            }
+        }
+
+        private func highlightSearchResults(_ selections: [PDFSelection],
+                                            in doc: PDFDocument,
+                                            scrollView: UIScrollView) {
+            guard let container = scrollView.subviews.first else { return }
+            searchOverlays.forEach { $0.removeFromSuperview() }
+            searchOverlays = []
+
+            for selection in selections {
+                for page in selection.pages {
+                    guard let pageIndex = doc.index(for: page) as Int?,
+                          pageIndex < pageViews.count else { continue }
+                    let imageView = pageViews[pageIndex]
+                    let meta = pageMetas[pageIndex]
+                    // PDFSelection bounds are in PDF page coords (origin bottom-left).
+                    let pdfBounds = selection.bounds(for: page)
+                    let pagePDFRect = page.bounds(for: .mediaBox)
+                    // Convert PDF coords → image pixel coords → imageView frame coords.
+                    let scaleX = meta.renderSize.width  / pagePDFRect.width
+                    let scaleY = meta.renderSize.height / pagePDFRect.height
+                    let x = pdfBounds.minX * scaleX
+                    let y = (pagePDFRect.height - pdfBounds.maxY) * scaleY
+                    let w = pdfBounds.width  * scaleX
+                    let h = pdfBounds.height * scaleY
+                    // Map into the imageView's frame within the container.
+                    let ivFrame = imageView.frame
+                    let imgX = ivFrame.minX + x
+                    let imgY = ivFrame.minY + y
+                    let overlay = UIView(frame: CGRect(x: imgX, y: imgY, width: max(w, 4), height: max(h, 4)))
+                    overlay.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.4)
+                    overlay.layer.cornerRadius = 2
+                    container.addSubview(overlay)
+                    searchOverlays.append(overlay)
+                }
+            }
+
+            // Scroll to the first match
+            if let first = searchOverlays.first {
+                let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+                let targetY = min(max(0, first.frame.minY - 60), maxOffset)
+                isScrollingProgrammatically = true
+                scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
+                isScrollingProgrammatically = false
+            }
+        }
+
+        // MARK: - Scroll / seek
 
         func seek(to target: Double, in scrollView: UIScrollView) {
             guard !isScrollingProgrammatically else { return }
@@ -195,7 +307,6 @@ private struct ContinuousPDFView: UIViewRepresentable {
             guard !pageOffsets.isEmpty else { return }
             let currentY = scrollView.contentOffset.y
 
-            // Find the page currently at or just past the top of the viewport
             var currentIndex = 0
             for (i, offset) in pageOffsets.enumerated() {
                 if offset <= currentY + 1 { currentIndex = i }
@@ -209,7 +320,6 @@ private struct ContinuousPDFView: UIViewRepresentable {
 
             isScrollingProgrammatically = true
             if currentPageEffect == .paper {
-                // Horizontal push transition — matches EPUB paper mode behaviour.
                 let transition = CATransition()
                 transition.duration = 0.35
                 transition.type = .push
@@ -227,13 +337,19 @@ private struct ContinuousPDFView: UIViewRepresentable {
                 scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
                 isScrollingProgrammatically = false
             }
+            renderWindow(around: targetIndex)
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate: Bool) {
-            if !willDecelerate { commitProgress(scrollView) }
+            if !willDecelerate { finishScroll(scrollView) }
         }
-        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { commitProgress(scrollView) }
-        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { commitProgress(scrollView) }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { finishScroll(scrollView) }
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { finishScroll(scrollView) }
+
+        private func finishScroll(_ scrollView: UIScrollView) {
+            commitProgress(scrollView)
+            renderWindow(around: currentPageIndex(in: scrollView))
+        }
 
         private func commitProgress(_ scrollView: UIScrollView) {
             guard !isScrollingProgrammatically else { return }
@@ -257,6 +373,7 @@ private struct ContinuousPDFView: NSViewRepresentable {
     let document: PDFDocument?
     @Binding var progress: Double
     @Binding var pageNavigationDirection: Int
+    var searchQuery: String = ""
     var pageEffect: PageEffect = .verticalSlide
     var onTap: () -> Void = {}
 
@@ -289,6 +406,16 @@ private struct ContinuousPDFView: NSViewRepresentable {
         let desiredMode: PDFDisplayMode = pageEffect == .paper ? .singlePage : .singlePageContinuous
         if nsView.displayMode != desiredMode { nsView.displayMode = desiredMode }
 
+        // PDF search: PDFView has native findString support on macOS.
+        if context.coordinator.lastSearchQuery != searchQuery {
+            context.coordinator.lastSearchQuery = searchQuery
+            if searchQuery.isEmpty {
+                nsView.clearSelection()
+            } else {
+                nsView.findString(searchQuery, withOptions: .caseInsensitive)
+            }
+        }
+
         let dir = pageNavigationDirection
         if dir != 0 {
             if dir > 0 { nsView.goToNextPage(nil) }
@@ -313,6 +440,7 @@ private struct ContinuousPDFView: NSViewRepresentable {
     class Coordinator: NSObject {
         @Binding var progress: Double
         var onTap: () -> Void
+        var lastSearchQuery: String = ""
         init(progress: Binding<Double>, onTap: @escaping () -> Void) {
             _progress = progress
             self.onTap = onTap

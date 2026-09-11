@@ -20,6 +20,8 @@ struct ReaderView: View {
     @State private var selectedTextRange: NSRange? = nil
     // feature 7: save progress when app backgrounds
     @Environment(\.scenePhase) private var scenePhase
+    // Reading session timer — records elapsed seconds for ReadingStats
+    @State private var sessionStart: Date? = nil
 
     init(book: Book) {
         self.book = book
@@ -100,10 +102,12 @@ struct ReaderView: View {
         // feature 3: apply color scheme globally so bars & system UI also adapt
         .preferredColorScheme(settings.preferredColorScheme)
         .task { vm.load() }
+        .onAppear { sessionStart = Date() }
         .onDisappear { saveProgress() }
         // feature 7: save when app goes to background or becomes inactive
         .onChange(of: scenePhase) { _, phase in
             if phase == .background || phase == .inactive { saveProgress() }
+            if phase == .active { sessionStart = Date() }
         }
         .sheet(isPresented: $showAppearance) { AppearancePanel(settings: settings) }
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
@@ -164,6 +168,13 @@ struct ReaderView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.title2)
                         .foregroundStyle(showSearch ? Color.accentColor : Color.primary)
+                }
+
+                // Bookmark current position
+                Button { vm.addBookmark() } label: {
+                    Image(systemName: vm.isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
+                        .font(.title2)
+                        .foregroundStyle(vm.isCurrentPositionBookmarked ? Color.accentColor : Color.primary)
                 }
 
                 // feature 9: highlight selected text (text books only)
@@ -246,9 +257,13 @@ struct ReaderView: View {
         selectedTextRange = nil
     }
 
-    // feature 7: persist progress immediately
+    // feature 7: persist progress and record reading time
     private func saveProgress() {
         library.updateProgress(for: book.id, progress: vm.progress)
+        if let start = sessionStart {
+            ReadingStats.record(seconds: Date().timeIntervalSince(start))
+            sessionStart = nil
+        }
         tts.stop()
     }
 }
