@@ -149,7 +149,11 @@ struct ReaderView: View {
             ContentsPanel(vm: vm) { target in vm.progress = min(max(target, 0), 1) }
         }
         // feature 1: Tab / arrow keys navigate pages (hardware keyboard on iPad/macOS)
-        .focusable()
+        // Not focusable while the UITextView owns first responder for selection:
+        // the SwiftUI focus system fighting UIKit's responder chain produced a
+        // burst of "AttributeGraph: cycle detected" on every selection change.
+        // Keyboard paging is disabled in highlight mode anyway.
+        .focusable(!highlightMode)
         .onKeyPress(.tab)        { pageNavigationDirection = 1;  return .handled }
         .onKeyPress(.rightArrow) { pageNavigationDirection = 1;  return .handled }
         .onKeyPress(.leftArrow)  { pageNavigationDirection = -1; return .handled }

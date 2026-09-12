@@ -1532,11 +1532,21 @@ struct NativeTextView: UIViewRepresentable {
             let tc = tv.textContainer
             let inset = tv.textContainerInset.top
             let viewH = max(tv.bounds.height, 100)
-            let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+            // LIVE, not captured once: contentSize grows as ensureLayout / the
+            // exact probe lay out further text (TextKit under-estimates unlaid
+            // regions). A maxOffset captured before the loop clamped correctedY
+            // to the OLD end of the document, made `correctedY == y`, and ended
+            // the loop silently short of the target (observed: an 80% seek ending
+            // at 61%, a 80% restore ending at 77% ≈ 16 pages off).
+            func currentMaxOffset() -> CGFloat {
+                let insets = tv.textContainerInset
+                let used = lm.usedRect(for: tc).height + insets.top + insets.bottom
+                return max(0, max(tv.contentSize.height, used) - tv.bounds.height)
+            }
 
             let t0 = CFAbsoluteTimeGetCurrent()
             var budgetStart = t0   // reset to the end of attempt 0 inside the loop
-            var y = min(max(0, startY), maxOffset)
+            var y = min(max(0, startY), currentMaxOffset())
             var landedCharIdx = 0
             var landedProgress = 0.0
             // Best-seen tracking: secant can overshoot on a density swing before it
@@ -1667,10 +1677,17 @@ struct NativeTextView: UIViewRepresentable {
                 }
                 guard abs(charDiff) > 300, attempt < maxAttempts - 1 else { break }
 
-                let correctedY = min(max(0, y + dy), maxOffset)
+                // Let UITextView sync contentSize with the layout the probe just
+                // established before clamping.
+                tv.layoutIfNeeded()
+                let correctedY = min(max(0, y + dy), currentMaxOffset())
                 prevY = y
                 prevCharIdx = landedCharIdx
-                guard abs(correctedY - y) > 0.5 else { break }
+                guard abs(correctedY - y) > 0.5 else {
+                    print(String(format: "[\(tag)] correction clamped at maxOffset=%.0f (wanted %.0f) — stopping",
+                                 Double(currentMaxOffset()), Double(y + dy)))
+                    break
+                }
                 y = correctedY
             }
 
