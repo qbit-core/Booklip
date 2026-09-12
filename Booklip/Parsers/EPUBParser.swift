@@ -43,9 +43,23 @@ struct EPUBParser: BookParser, Sendable {
             throw EPUBError.cannotOpenArchive
         }
 
-        let containerXML = try readEntry("META-INF/container.xml", in: archive)
+        // Archive[path] / archive.first{} do a LINEAR SCAN of the central directory,
+        // and each step re-reads that entry's central-directory + local-file-header
+        // structs from disk (see ZIPFoundation's makeIterator — fseeko/fread per
+        // entry). Calling that once per spine chapter (~1397×) against a multi-
+        // thousand-entry archive was effectively O(N×M) disk I/O — likely the
+        // single biggest contributor to the ~32s parse, ahead of even the stripHTML
+        // cost. Build the path→Entry map with ONE full scan up front; every
+        // subsequent readEntry/readData call becomes an in-memory O(1) lookup.
+        let _indexT0 = CFAbsoluteTimeGetCurrent()
+        let entryIndex: [String: Entry] = Dictionary(archive.map { ($0.path, $0) },
+                                                      uniquingKeysWith: { first, _ in first })
+        print(String(format: "[TIME] Open-BuildEntryIndex %.0f ms  entries=%d",
+                     (CFAbsoluteTimeGetCurrent() - _indexT0) * 1000, entryIndex.count))
+
+        let containerXML = try readEntry("META-INF/container.xml", in: archive, index: entryIndex)
         let opfPath = try extractOPFPath(from: containerXML)
-        let opfXML = try readEntry(opfPath, in: archive)
+        let opfXML = try readEntry(opfPath, in: archive, index: entryIndex)
         os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
                     "status=ok opfPath=%{public}s", opfPath)
 
@@ -55,12 +69,13 @@ struct EPUBParser: BookParser, Sendable {
         print("[EPUB] spine=\(spineHrefs.count) fonts=\(opf.fontHrefs.count)")
 
         // Extract (and de-obfuscate) embedded fonts.
-        let fonts = extractFonts(opf.fontHrefs, base: opfBase, uid: opf.uniqueIdentifier, archive: archive)
+        let fonts = extractFonts(opf.fontHrefs, cssHrefs: opf.cssHrefs, base: opfBase,
+                                 uid: opf.uniqueIdentifier, archive: archive, index: entryIndex)
 
         // Extract cover image.
         var cover: Data?
         if let coverHref = opf.coverHref {
-            cover = try? readData(resolvePath(coverHref, relativeTo: opfBase), in: archive)
+            cover = try? readData(resolvePath(coverHref, relativeTo: opfBase), in: archive, index: entryIndex)
         }
 
         var fullText = ""
@@ -87,12 +102,16 @@ struct EPUBParser: BookParser, Sendable {
             let titleHint: String?
             var segments: [RawSegment]
         }
+        let _phase1T0 = CFAbsoluteTimeGetCurrent()
+        let readID = OSSignpostID(log: booklipSpLog)
+        os_signpost(.begin, log: booklipSpLog, name: "Open-ReadHTML", signpostID: readID,
+                    "spine=%d", spineHrefs.count)
         var chapterRaws: [ChapterRaw] = []
         chapterRaws.reserveCapacity(spineHrefs.count)
         for (i, href) in spineHrefs.enumerated() {
             let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
             let chapterDir = (entryPath as NSString).deletingLastPathComponent
-            guard let html = try? readEntry(entryPath, in: archive) else { continue }
+            guard let html = try? readEntry(entryPath, in: archive, index: entryIndex) else { continue }
             let titleHint = firstHeading(in: html)
                 ?? (href as NSString).lastPathComponent
                     .replacingOccurrences(of: ".xhtml", with: "")
@@ -111,12 +130,16 @@ struct EPUBParser: BookParser, Sendable {
                 segments: segs))
             _ = i
         }
+        os_signpost(.end, log: booklipSpLog, name: "Open-ReadHTML", signpostID: readID)
+        print(String(format: "[TIME] Open-ReadHTML(Phase1) %.0f ms  chapters=%d",
+                     (CFAbsoluteTimeGetCurrent() - _phase1T0) * 1000, chapterRaws.count))
 
         // Phase 2 (concurrent): stripHTML is a pure function over its String
         // argument — no shared mutable state — so every chunk across every
         // chapter can run across all cores at once. This is the part that was
         // ~38s serial; precompiled regexes + concurrentPerform address both
         // the compilation overhead and the single-core bottleneck.
+        let _phase2T0 = CFAbsoluteTimeGetCurrent()
         struct TextWork { let ci: Int; let si: Int; let text: String }
         var works: [TextWork] = []
         for (ci, ch) in chapterRaws.enumerated() {
@@ -139,11 +162,36 @@ struct EPUBParser: BookParser, Sendable {
         for (i, work) in works.enumerated() {
             chapterRaws[work.ci].segments[work.si].stripped = strippedResults[i]
         }
+        print(String(format: "[TIME] Open-StripHTML(Phase2) %.0f ms  chunks=%d",
+                     (CFAbsoluteTimeGetCurrent() - _phase2T0) * 1000, works.count))
 
         // Phase 3 (serial): image reads need the archive again; text assembly
         // must preserve spine + in-chapter segment order for offsets to be correct.
+        //
+        // FIX (O(N²) — the actual ~32s source): `(fullText as NSString).length`
+        // was recomputed on EVERY chapter iteration, which re-bridges/re-measures
+        // the WHOLE accumulated string so far — O(current length) per call, and
+        // since fullText grows to the full document size, summed across ~1397
+        // chapters that's O(N²) in the final text length. Replaced with a
+        // `runningOffset` counter updated incrementally (O(segment length) per
+        // append, O(N) total). Likewise `fullText += x` (repeated concatenation)
+        // is replaced with a `[String]` buffer + one `joined()` at the end, so
+        // there's no repeated re-copying of the growing string.
+        //
+        // Character accounting: only `.text` segments consume characters in
+        // fullText's offset space (`stripped.utf16.count + 2` for the "\n\n"
+        // separator) — Phase 1/3 never insert any placeholder for `.imageSrc`
+        // segments (images only ever become `.image(data)` blocks, no text is
+        // appended for them), so `runningOffset` is left untouched for images.
+        let _phase3T0 = CFAbsoluteTimeGetCurrent()
+        let assembleID = OSSignpostID(log: booklipSpLog)
+        os_signpost(.begin, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
+                    "chapters=%d", chapterRaws.count)
+        var runningOffset = 0
+        var parts: [String] = []
+        parts.reserveCapacity(works.count * 2)
         for (i, ch) in chapterRaws.enumerated() {
-            let startOffset = (fullText as NSString).length
+            let startOffset = runningOffset
             hrefToOffset[ch.hrefKey] = startOffset
             let chapterTitle = ch.titleHint ?? "Chapter \(i + 1)"
             chapterMarks.append((chapterTitle, startOffset))
@@ -153,28 +201,38 @@ struct EPUBParser: BookParser, Sendable {
                 case .text:
                     if !seg.stripped.isEmpty {
                         blocks.append(.text(seg.stripped))
-                        fullText += seg.stripped + "\n\n"
+                        parts.append(seg.stripped)
+                        parts.append("\n\n")
+                        runningOffset += seg.stripped.utf16.count + 2
                     }
                 case .imageSrc(let src):
                     let imgPath = resolvePath(src, relativeTo: ch.chapterDir)
-                    if let data = try? readData(imgPath, in: archive), !data.isEmpty {
+                    if let data = try? readData(imgPath, in: archive, index: entryIndex), !data.isEmpty {
                         blocks.append(.image(data))
                         imageBlockCount += 1
                     }
+                    // No characters added — images never appear in fullText's
+                    // offset space, only as their own .image block.
                 }
             }
         }
+        fullText = parts.joined()
+        os_signpost(.end, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
+                    "chars=%d", runningOffset)
+        print(String(format: "[TIME] Open-AssembleText(Phase3) %.0f ms  chars=%d images=%d",
+                     (CFAbsoluteTimeGetCurrent() - _phase3T0) * 1000, runningOffset, imageBlockCount))
+
         os_signpost(.end, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
                     "chars=%d blocks=%d images=%d",
-                    (fullText as NSString).length, blocks.count, imageBlockCount)
+                    runningOffset, blocks.count, imageBlockCount)
 
-        let totalLen = max(1, (fullText as NSString).length)
+        let totalLen = max(1, runningOffset)
 
         // Prefer a real TOC (NCX/nav) for proper titles + nesting; map each
         // entry's target file to the spine offset we recorded. Fall back to
         // per-spine headings.
         var chapters: [Chapter] = []
-        if let tocEntries = parseTOC(opf: opf, base: opfBase, archive: archive), !tocEntries.isEmpty {
+        if let tocEntries = parseTOC(opf: opf, base: opfBase, archive: archive, index: entryIndex), !tocEntries.isEmpty {
             chapters = tocEntries.compactMap { entry in
                 let file = (entry.href.components(separatedBy: "#").first ?? entry.href as String)
                 let key = (file as NSString).lastPathComponent
@@ -202,10 +260,10 @@ struct EPUBParser: BookParser, Sendable {
 
     // Parse the NCX (EPUB2) or nav document (EPUB3) into a flat, ordered,
     // level-tagged list of TOC entries.
-    nonisolated private func parseTOC(opf: OPFInfo, base: String, archive: Archive) -> [TOCEntry]? {
+    nonisolated private func parseTOC(opf: OPFInfo, base: String, archive: Archive, index: [String: Entry]) -> [TOCEntry]? {
         // EPUB2 NCX
         if let ncx = opf.ncxHref,
-           let xml = try? readEntry(resolvePath(ncx, relativeTo: base), in: archive),
+           let xml = try? readEntry(resolvePath(ncx, relativeTo: base), in: archive, index: index),
            let data = xml.data(using: .utf8) {
             let delegate = NCXDelegate()
             let parser = XMLParser(data: data)
@@ -215,7 +273,7 @@ struct EPUBParser: BookParser, Sendable {
         }
         // EPUB3 nav document (regex over the toc nav's anchors)
         if let nav = opf.navHref,
-           let html = try? readEntry(resolvePath(nav, relativeTo: base), in: archive) {
+           let html = try? readEntry(resolvePath(nav, relativeTo: base), in: archive, index: index) {
             return parseNavHTML(html)
         }
         return nil
@@ -259,17 +317,51 @@ struct EPUBParser: BookParser, Sendable {
 
     // MARK: - Embedded fonts (+ EPUB font de-obfuscation)
 
-    nonisolated private func extractFonts(_ hrefs: [String], base: String,
-                                          uid: String?, archive: Archive) -> [Data] {
-        guard !hrefs.isEmpty else { return [] }
+    nonisolated private func extractFonts(_ hrefs: [String], cssHrefs: [String], base: String,
+                                          uid: String?, archive: Archive, index: [String: Entry]) -> [Data] {
+        // Font discovery, in priority order (deduplicated by archive path):
+        //   1. @font-face src:url(...) in the book's stylesheets — this is what
+        //      the book ACTUALLY renders with, so it wins.
+        //   2. Manifest items with a font media-type / extension.
+        //   3. Any archive entry with a font extension (last resort).
+        // Trusting the manifest alone is not enough: some publishers (e.g. Korean
+        // light-novel houses using a scrambled-codepoint anti-copy font) ship an
+        // OPF that lists a font file that does NOT exist in the archive
+        // (`Fonts/KoPubWorldDotumMedium.ttf`), while the real font
+        // (`Fonts/unique_font.ttf`) is referenced only from style.css. With no
+        // font registered the scrambled text fell back to the system font and
+        // rendered as garbled-but-valid-looking Hangul.
+        var paths: [String] = []
+        var seen: Set<String> = []
+        func add(_ path: String) {
+            let key = path.lowercased()
+            guard !key.isEmpty, !seen.contains(key), index[path] != nil
+                    || index.keys.contains(where: { $0.caseInsensitiveCompare(path) == .orderedSame })
+            else { return }
+            seen.insert(key)
+            paths.append(path)
+        }
+
+        for css in cssHrefs {
+            let cssPath = resolvePath(css, relativeTo: base)
+            guard let text = try? readEntry(cssPath, in: archive, index: index), !text.isEmpty else { continue }
+            let cssDir = (cssPath as NSString).deletingLastPathComponent
+            for url in fontFaceURLs(in: text) {
+                add(resolvePath(url, relativeTo: cssDir))
+            }
+        }
+        for href in hrefs { add(resolvePath(href, relativeTo: base)) }
+        for path in index.keys.sorted() where Self.isFontPath(path) { add(path) }
+
+        print("[EPUB] font candidates=\(paths)")
+        guard !paths.isEmpty else { return [] }
 
         // Which font paths are obfuscated, and by which algorithm?
-        let obfuscation = parseEncryption(in: archive)   // path → algorithm
+        let obfuscation = parseEncryption(in: archive, index: index)   // path → algorithm
 
         var fonts: [Data] = []
-        for href in hrefs {
-            let path = resolvePath(href, relativeTo: base)
-            guard var data = try? readData(path, in: archive), !data.isEmpty else { continue }
+        for path in paths {
+            guard var data = try? readData(path, in: archive, index: index), !data.isEmpty else { continue }
 
             // Match the encryption entry by suffix (encryption.xml URIs may be root-relative).
             if let algo = obfuscation.first(where: { path.hasSuffix($0.key) || $0.key.hasSuffix(path) })?.value,
@@ -281,9 +373,39 @@ struct EPUBParser: BookParser, Sendable {
         return fonts
     }
 
+    nonisolated private static func isFontPath(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        return lower.hasSuffix(".ttf") || lower.hasSuffix(".otf") || lower.hasSuffix(".ttc")
+            || lower.hasSuffix(".woff") || lower.hasSuffix(".woff2")
+    }
+
+    // Every url(...) inside an @font-face { ... } block, in document order.
+    nonisolated private func fontFaceURLs(in css: String) -> [String] {
+        let ns = css as NSString
+        var urls: [String] = []
+        let blockPattern = #"@font-face\s*\{([^}]*)\}"#
+        let urlPattern = #"url\(\s*["']?([^"')]+)["']?\s*\)"#
+        guard let blockRe = try? NSRegularExpression(pattern: blockPattern, options: .caseInsensitive),
+              let urlRe = try? NSRegularExpression(pattern: urlPattern, options: .caseInsensitive)
+        else { return [] }
+        blockRe.enumerateMatches(in: css, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+            guard let m, m.numberOfRanges >= 2 else { return }
+            let body = ns.substring(with: m.range(at: 1))
+            let bodyNS = body as NSString
+            urlRe.enumerateMatches(in: body, range: NSRange(location: 0, length: bodyNS.length)) { u, _, _ in
+                guard let u, u.numberOfRanges >= 2 else { return }
+                let raw = bodyNS.substring(with: u.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                // Skip data: URIs and absolute http(s) references — not archive entries.
+                guard !raw.lowercased().hasPrefix("data:"), !raw.lowercased().hasPrefix("http") else { return }
+                urls.append(raw)
+            }
+        }
+        return urls
+    }
+
     // Returns map of cipher-reference path → algorithm URI.
-    nonisolated private func parseEncryption(in archive: Archive) -> [String: String] {
-        guard let xml = try? readEntry("META-INF/encryption.xml", in: archive), !xml.isEmpty else { return [:] }
+    nonisolated private func parseEncryption(in archive: Archive, index: [String: Entry]) -> [String: String] {
+        guard let xml = try? readEntry("META-INF/encryption.xml", in: archive, index: index), !xml.isEmpty else { return [:] }
         let ns = xml as NSString
         var result: [String: String] = [:]
         // Pair each <EncryptionMethod Algorithm="..."> with the following <CipherReference URI="...">
@@ -336,16 +458,21 @@ struct EPUBParser: BookParser, Sendable {
 
     // MARK: - Helpers
 
-    nonisolated private func readEntry(_ path: String, in archive: Archive) throws -> String {
-        let data = try readData(path, in: archive)
+    nonisolated private func readEntry(_ path: String, in archive: Archive, index: [String: Entry]) throws -> String {
+        let data = try readData(path, in: archive, index: index)
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
     }
 
-    nonisolated private func readData(_ path: String, in archive: Archive) throws -> Data {
-        // ZIP entries are case-sensitive; try the exact path then a case-insensitive match.
-        let entry = archive[path] ?? archive.first {
-            $0.path.caseInsensitiveCompare(path) == .orderedSame
-        }
+    nonisolated private func readData(_ path: String, in archive: Archive, index: [String: Entry]) throws -> Data {
+        // O(1) via the pre-built path→Entry index — archive[path] / archive.first{}
+        // do a linear scan of the central directory where EACH step re-reads that
+        // entry's central-directory + local-file-header structs from disk (see
+        // ZIPFoundation's Archive.makeIterator), so calling it once per spine
+        // chapter against a multi-thousand-entry archive was effectively O(N×M)
+        // disk I/O — the dominant cost in the original ~32s parse.
+        // Case-insensitive fallback stays a linear scan (over the index's keys,
+        // no disk I/O) — rare path, only hit when the exact key isn't found.
+        let entry = index[path] ?? index.first { $0.key.caseInsensitiveCompare(path) == .orderedSame }?.value
         guard let entry else { throw EPUBError.missingEntry(path) }
         var data = Data()
         _ = try archive.extract(entry) { chunk in data.append(chunk) }
@@ -414,6 +541,7 @@ struct EPUBParser: BookParser, Sendable {
         var author: String
         var hrefs: [String]
         var fontHrefs: [String]
+        var cssHrefs: [String]
         var uniqueIdentifier: String?
         var coverHref: String?
         var ncxHref: String?
@@ -450,6 +578,7 @@ struct EPUBParser: BookParser, Sendable {
             author: delegate.creator.isEmpty ? "Unknown" : delegate.creator,
             hrefs: hrefs,
             fontHrefs: delegate.fontHrefs,
+            cssHrefs: delegate.cssHrefs,
             uniqueIdentifier: delegate.uniqueIdentifier,
             coverHref: coverHref,
             ncxHref: delegate.ncxHref,
@@ -553,6 +682,7 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
     var manifest: [String: String] = [:]    // id → href
     var manifestOrder: [String] = []         // manifest ids in document order
     var fontHrefs: [String] = []             // hrefs of embedded font items
+    var cssHrefs: [String] = []              // hrefs of stylesheets (for @font-face discovery)
     var uniqueIDRef: String?                 // package@unique-identifier (an id)
     var identifiers: [String: String] = [:]  // id → dc:identifier value
     var spine: [String] = []                 // idrefs in reading order
@@ -580,9 +710,10 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
                 let media = attributeDict["media-type"]?.lowercased() ?? ""
                 let lower = href.lowercased()
                 if media.contains("font") || lower.hasSuffix(".ttf") || lower.hasSuffix(".otf")
-                    || lower.hasSuffix(".ttc") {
+                    || lower.hasSuffix(".ttc") || lower.hasSuffix(".woff") || lower.hasSuffix(".woff2") {
                     fontHrefs.append(href)
                 }
+                if media == "text/css" || lower.hasSuffix(".css") { cssHrefs.append(href) }
                 let isImage = media.hasPrefix("image/") || lower.hasSuffix(".jpg")
                     || lower.hasSuffix(".jpeg") || lower.hasSuffix(".png") || lower.hasSuffix(".gif")
                 if isImage { imageHrefs.append(href) }

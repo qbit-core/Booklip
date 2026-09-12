@@ -411,13 +411,27 @@ private struct ContinuousPDFView: NSViewRepresentable {
         let desiredMode: PDFDisplayMode = pageEffect == .paper ? .singlePage : .singlePageContinuous
         if nsView.displayMode != desiredMode { nsView.displayMode = desiredMode }
 
-        // PDF search: PDFView has native findString support on macOS.
+        // PDF search: findString lives on PDFDocument (not PDFView). It is
+        // synchronous, so run it off-main and then highlight + jump on main.
         if context.coordinator.lastSearchQuery != searchQuery {
             context.coordinator.lastSearchQuery = searchQuery
             if searchQuery.isEmpty {
+                nsView.highlightedSelections = nil
                 nsView.clearSelection()
-            } else {
-                nsView.findString(searchQuery, withOptions: .caseInsensitive)
+            } else if let doc = nsView.document {
+                let query = searchQuery
+                DispatchQueue.global(qos: .userInitiated).async { [weak nsView] in
+                    let selections = doc.findString(query, withOptions: .caseInsensitive)
+                    DispatchQueue.main.async { [weak nsView] in
+                        guard let nsView, nsView.document === doc,
+                              context.coordinator.lastSearchQuery == query else { return }
+                        nsView.highlightedSelections = selections.isEmpty ? nil : selections
+                        if let first = selections.first {
+                            nsView.setCurrentSelection(first, animate: true)
+                            nsView.go(to: first)
+                        }
+                    }
+                }
             }
         }
 

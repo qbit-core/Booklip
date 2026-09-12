@@ -35,6 +35,13 @@ class ReaderViewModel: ObservableObject {
     @Published var progress: Double = 0.0
     @Published var isLoading = true
     @Published var errorMessage: String?
+    /// True while a large jump (initial position restore, or a big TOC/search/
+    /// progress-bar seek) is establishing TextKit layout for the target position.
+    /// This used to take seconds-to-minutes on very large books; the cause
+    /// (TextKit font-attribute fixing for a base font without glyphs for the
+    /// text) is fixed in FontRegistrar.effectiveFontName. The flag remains so
+    /// the UI shows a spinner instead of appearing frozen if a stall recurs.
+    @Published var isPositioning = false
 
     /// Exact page-start character offsets, computed by BookPaginator. Empty until ready.
     @Published var pageStarts: [Int] = []
@@ -107,7 +114,11 @@ class ReaderViewModel: ObservableObject {
         guard book.format != .pdf else { return }
         let text = plainText
         guard !text.isEmpty else { return }
-        let fontName = settings.useEmbeddedFont ? (embeddedFontName ?? settings.fontName) : settings.fontName
+        // Must match the font the text view actually renders with (see
+        // FontRegistrar.effectiveFontName), or page counts drift from the layout.
+        let fontName = FontRegistrar.effectiveFontName(
+            settings.useEmbeddedFont ? (embeddedFontName ?? settings.fontName) : settings.fontName,
+            sample: text)
         let key = BookPaginator.CacheKey(
             bookID: book.id,
             fontName: fontName,
@@ -246,7 +257,7 @@ class ReaderViewModel: ObservableObject {
                 plainText = text
                 attributedText = attr
                 blocks = parsedBlocks
-                embeddedFontName = FontRegistrar.registerFirst(fonts)
+                embeddedFontName = FontRegistrar.registerFirst(fonts, preferringCoverageOf: text)
                 chapters = parsedChapters
                 // Restore progress from exact charIndex (integer) to avoid
                 // float round-trip error from book.progress (Double).

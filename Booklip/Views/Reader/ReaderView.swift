@@ -100,6 +100,24 @@ struct ReaderView: View {
                         .ignoresSafeArea()
                 )
             }
+
+            // A large jump (initial position restore, or a big TOC/search/progress-
+            // bar seek) used to block the main thread for seconds on very large
+            // books; the cause is fixed (FontRegistrar.effectiveFontName). This
+            // overlay stays as a safety net so any residual stall reads as
+            // "working" rather than "frozen".
+            if vm.isPositioning {
+                Color.black.opacity(0.15).ignoresSafeArea()
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("이동 중…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(24)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .allowsHitTesting(true)
+            }
         }
         .hideNavigationBar()
         // feature 3: apply color scheme globally so bars & system UI also adapt

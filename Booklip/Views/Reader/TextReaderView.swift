@@ -185,7 +185,7 @@ struct NativeTextView: NSViewRepresentable {
         let textView = scrollView.documentView as! NSTextView
         context.coordinator.userHighlights = highlights
 
-        let macFontName = embeddedFontName ?? settings.fontName
+        let macFontName = FontRegistrar.effectiveFontName(embeddedFontName ?? settings.fontName, sample: text ?? "")
         let macLayoutKey = "\(macFontName)|\(settings.fontSize)|\(settings.lineSpacing)"
         let macColorKey = "\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
@@ -295,7 +295,7 @@ struct NativeTextView: NSViewRepresentable {
     }
 
     private func applyContent(to textView: NSTextView) {
-        let fontName = embeddedFontName ?? settings.fontName
+        let fontName = FontRegistrar.effectiveFontName(embeddedFontName ?? settings.fontName, sample: text ?? "")
         let font = NSFont(name: fontName, size: settings.fontSize)
             ?? NSFont.systemFont(ofSize: settings.fontSize)
         let color = NSColor(settings.currentPreset.text)
@@ -660,7 +660,7 @@ struct NativeTextView: UIViewRepresentable {
         //   applyContent now uses a single lazy attributedText= with style embedded,
         //   so no synchronous layout pass runs on the main thread.
         // • color/highlight only → applyColorOnly (attribute-only, no layout triggered)
-        let fontName = embeddedFontName ?? settings.fontName
+        let fontName = FontRegistrar.effectiveFontName(embeddedFontName ?? settings.fontName, sample: text ?? "")
         let layoutKey = "\(fontName)|\(settings.fontSize)|\(settings.lineSpacing)"
         let colorKey = "\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
@@ -798,7 +798,7 @@ struct NativeTextView: UIViewRepresentable {
     }
 
     private func applyContent(to textView: UITextView, coordinator: Coordinator? = nil) {
-        let fontName = embeddedFontName ?? settings.fontName
+        let fontName = FontRegistrar.effectiveFontName(embeddedFontName ?? settings.fontName, sample: text ?? "")
         let font = UIFont(name: fontName, size: settings.fontSize)
             ?? UIFont.systemFont(ofSize: settings.fontSize)
         let color = UIColor(settings.currentPreset.text)
@@ -1115,31 +1115,12 @@ struct NativeTextView: UIViewRepresentable {
         // Tracks consecutive page-turn char deltas for [PAGE] calibration.
         private var lastPageCharIdx: Int? = nil
         private var pageCharDeltas: [Int] = []
+        // Guards PAGE-CAL so it locks at most once per session — without this,
+        // pageCharDeltas refills after removeAll() and re-locks (and re-saves the
+        // profile / re-rebases currentPage) every further 10 page turns.
+        private var hasLockedCharsPerPage = false
         private var postSeekExclude = false   // drop next sample after a seek
         private var currentProfileKey = ""
-
-        // ── Local char/pt density for restore & seek correction ──────────────────
-        // Set from the seed formula (or a loaded PaginationProfile) in
-        // triggerPaginationIfNeeded, then overwritten with the measured
-        // 10-sample median once PAGE-CAL locks. Used to convert a character-count
-        // error directly to points via the ACTUAL local density, instead of
-        // (targetProgress - landedProgress) * tkH which divides by the whole
-        // document's estimated height — a global average that can be off by an
-        // order of magnitude from the true local density, causing the restore/seek
-        // correction loop to converge far too slowly (observed: ~1/11 of the
-        // needed distance per iteration).
-        private var resolvedCharsPerPage: Int = 0
-        private var resolvedPageStep: CGFloat = 0
-
-        // dy (points) to move so that `landedChar` becomes `targetChar`, using the
-        // local density charsPerPage/pageStep (chars per point) rather than a
-        // whole-document average. Before calibration locks, falls back to the
-        // seed values (432/648) computed at pagination trigger time.
-        private func correctionDelta(targetChar: Int, landedChar: Int) -> CGFloat {
-            let cpp = resolvedCharsPerPage > 0 ? resolvedCharsPerPage : 432
-            let step = resolvedPageStep > 0 ? resolvedPageStep : 648
-            return CGFloat(targetChar - landedChar) * step / CGFloat(max(1, cpp))
-        }
 
         // ── Stable progress denominator ────────────────────────────────────────
         // Set once when the book's text is loaded; never updated thereafter.
@@ -1225,8 +1206,6 @@ struct NativeTextView: UIViewRepresentable {
                 currentProfileKey = profileKey
                 let cpp = PaginationProfile.load(key: profileKey)?.charsPerPage ?? seedCPP
                 vm.seedTotalPages(charsPerPage: cpp)
-                resolvedCharsPerPage = cpp
-                resolvedPageStep = pageStep
 
                 lastPaginationKey = layoutKey
                 vm.startPagination(containerWidth: tv.bounds.width,
@@ -1434,81 +1413,241 @@ struct NativeTextView: UIViewRepresentable {
 
         private var lastAppliedSeekTarget: Double = -1
 
+        // Shared NCL-safe landing loop used by BOTH didLayout's restore and
+        // applySeek. Iteratively moves `tv`'s contentOffset toward the Y that
+        // lands on `targetCharIdx`, using SECANT interpolation from the actual
+        // (Δy, Δchar) of the last two real samples for local density — not a
+        // fixed cpp/pageStep ratio, which measured up to ~9x off between the
+        // already-laid-out (~0.35-0.47 chars/pt) and not-yet-laid-out
+        // (~3-4.4 chars/pt) regions.
+        //
+        // ROOT CAUSE of the multi-second/minute stalls this loop was blamed for
+        // (2026-09-12, process sample): NOT layout. It was NSTextStorage
+        // fixFontAttribute(in:) inserting per-run substitute fonts (memmove of the
+        // whole run array per insert — quadratic) because the base font (Georgia)
+        // had no Hangul glyphs. It runs lazily inside ensureLayout/layoutIfNeeded/
+        // glyphRange(forBoundingRect:), so every timing below pointed at layout.
+        // Fixed at the source by FontRegistrar.effectiveFontName (base font that
+        // covers the text): same 59%→22% seek went 173,439ms → 62ms, cold restore
+        // 2,284ms → 103ms. The notes below remain accurate about API semantics.
+        //
+        // Each attempt calls ensureLayout(forBoundingRect:) before setContentOffset —
+        // measured on-device to be REQUIRED, not optional: without it, jumping into
+        // a not-yet-laid-out region gets silently rejected by UIScrollView (snaps
+        // back to contentOffset=0) even though the glyphRange measurement below
+        // still reports a plausible landedProgress (it's keyed off our own `y`, not
+        // the actual — rejected — contentOffset), masking the failure. Removing
+        // ensureLayout also did NOT reduce the cost: it just moved into
+        // layoutIfNeeded() instead, same order of magnitude (measured: 3042ms for
+        // a single jump to ~51% of a 7.8M-char document on cold restore). ensureMs
+        // and stepMs are logged separately so this split stays visible.
+        //
+        // Safety guards below apply regardless of root cause of a hang:
+        // - 350ms wall-clock budget, measured from the END of attempt 0: attempt 0
+        //   carries the unavoidable cold-layout cost (~3s on a 7.8M-char book), so
+        //   counting it made the loop bail after a single attempt on every cold
+        //   restore/seek — no correction at all, landing thousands of chars off.
+        //   The budget exists to bound the CORRECTION attempts, not the first hop.
+        //   Exceeded → snap to the best sample seen, stop. (Can only stop BETWEEN
+        //   attempts — cannot interrupt a call already in flight.)
+        // - dy clamp: +50,000pt forward / -20,000pt backward — backward seeks into
+        //   not-yet-laid-out regions have been the expensive/hang-prone direction.
+        // - density validity: only 0.01...50 chars/pt accepted; negative or
+        //   non-finite density (a degenerate sample) is rejected, falling back to
+        //   the live textStorage.length/contentSize.height bootstrap instead.
+        // Logs "[tag] attempt=N landed=X diff=Y density=Z dy=W ensureMs=U stepMs=V
+        // elapsed=Nms" per try.
+        private func landingLoop(
+            tv: UITextView, startY: CGFloat, targetCharIdx: Int, totalChars: Int,
+            tag: String, maxAttempts: Int = 8, wallClockBudgetMs: Double = 350,
+            onFirstLanding: ((Int, Double) -> Void)? = nil
+        ) -> (y: CGFloat, charIdx: Int, progress: Double) {
+            let lm = tv.layoutManager
+            let tc = tv.textContainer
+            let inset = tv.textContainerInset.top
+            let viewH = max(tv.bounds.height, 100)
+            let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
+
+            let t0 = CFAbsoluteTimeGetCurrent()
+            var budgetStart = t0   // reset to the end of attempt 0 inside the loop
+            var y = min(max(0, startY), maxOffset)
+            var landedCharIdx = 0
+            var landedProgress = 0.0
+            // Best-seen tracking: secant can overshoot on a density swing before it
+            // converges — if the loop ends somewhere worse, snap back to this.
+            var bestY = y
+            var bestCharIdx = 0
+            var bestAbsDiff = Int.max
+            var prevY: CGFloat?
+            var prevCharIdx: Int?
+
+            for attempt in 0..<maxAttempts {
+                // REVERTED: removing ensureLayout(forBoundingRect:) here did NOT
+                // eliminate the multi-second cost — it just moved it into
+                // layoutIfNeeded() (measured: stepMs=3042 with ensureLayout absent,
+                // same order of magnitude as ensureLayout alone previously). Worse,
+                // it reintroduced a real regression: setContentOffset into a region
+                // TextKit hasn't actually laid out yet gets silently rejected by
+                // UIScrollView, which snaps back to contentOffset=(0,0) — while our
+                // own `y` variable (used to build visRect for the glyphRange
+                // measurement) still reported a plausible landedProgress, masking
+                // the mismatch (confirmed on device: landed=0.51 but the final
+                // offsetY was 0). ensureLayout is what makes TextKit accept the
+                // offset in the first place; it isn't optional. Timed separately
+                // from setContentOffset+layoutIfNeeded below so the split is visible.
+                let ensureRect = CGRect(x: 0, y: max(0, y - inset - viewH * 0.5),
+                                        width: tc.size.width, height: viewH * 2)
+                let _tEnsure = CFAbsoluteTimeGetCurrent()
+                lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
+                let ensureMs = (CFAbsoluteTimeGetCurrent() - _tEnsure) * 1000
+
+                let _tStep0 = CFAbsoluteTimeGetCurrent()
+                isScrollingProgrammatically = true
+                tv.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+                isScrollingProgrammatically = false
+                tv.layoutIfNeeded()
+                let stepMs = (CFAbsoluteTimeGetCurrent() - _tStep0) * 1000
+                // Defensive check for the exact regression found on device: UIScrollView
+                // can silently reject an offset into not-yet-laid-out content and snap
+                // back (commonly to 0) rather than throwing or failing ensureLayout —
+                // the glyphRange measurement below still succeeds (it's keyed off our
+                // own `y`, not the actual contentOffset), so without this check a
+                // rejected jump looks identical to a successful one in the logs.
+                if abs(tv.contentOffset.y - y) > 5 {
+                    print(String(format: "[\(tag)] WARNING setContentOffset rejected: requested=%.0f actual=%.0f",
+                                 Double(y), Double(tv.contentOffset.y)))
+                }
+
+                let visRect = CGRect(x: 0, y: max(0, y - inset), width: tc.size.width, height: viewH)
+                let gr = lm.glyphRange(forBoundingRect: visRect, in: tc)
+                if gr.location != NSNotFound, gr.length > 0, totalChars > 0 {
+                    landedCharIdx = lm.characterIndexForGlyph(at: gr.location)
+                    landedProgress = min(max(Double(landedCharIdx) / Double(totalChars), 0), 1)
+                }
+                if attempt == 0 { onFirstLanding?(landedCharIdx, landedProgress) }
+
+                let charDiff = targetCharIdx - landedCharIdx
+                if abs(charDiff) < bestAbsDiff {
+                    bestAbsDiff = abs(charDiff)
+                    bestY = y
+                    bestCharIdx = landedCharIdx
+                }
+
+                // [3] density validity guard: reject negative/non-finite/out-of-range
+                // samples (0.01...50 chars/pt) rather than extrapolating off them.
+                var density = 0.0
+                if let py = prevY, let pc = prevCharIdx, abs(y - py) > 0.5, pc != landedCharIdx {
+                    let raw = Double(landedCharIdx - pc) / Double(y - py)
+                    if raw.isFinite, raw >= 0.01, raw <= 50 { density = raw }
+                }
+
+                let dyRaw: CGFloat
+                if density != 0 {
+                    dyRaw = CGFloat(Double(charDiff) / density)
+                } else {
+                    // Bootstrap: no valid local density yet — use CURRENT
+                    // textStorage.length / tv.contentSize.height (refreshed by the
+                    // ensureLayout calls) rather than a stale whole-document ratio.
+                    let liveH = Double(tv.contentSize.height)
+                    let bootstrapDensity = liveH > 0 ? Double(tv.textStorage.length) / liveH : 0
+                    dyRaw = bootstrapDensity > 0 ? CGFloat(Double(charDiff) / bootstrapDensity) : 0
+                }
+                // [3] asymmetric dy clamp — backward (negative dy) is the historically
+                // expensive/hang-prone direction (seeking into not-yet-laid-out text).
+                let dy = dyRaw >= 0 ? min(50_000, dyRaw) : max(-20_000, dyRaw)
+
+                let now = CFAbsoluteTimeGetCurrent()
+                let elapsedMs = (now - t0) * 1000
+                // Budget clock starts when attempt 0 finishes (see doc comment).
+                if attempt == 0 { budgetStart = now }
+                let budgetMs = (now - budgetStart) * 1000
+                print(String(format: "[\(tag)] attempt=%d landed=%.4f diff=%d density=%.4f dy=%.1f ensureMs=%.0f stepMs=%.0f elapsed=%.0fms budget=%.0fms",
+                             attempt, landedProgress, charDiff, density, Double(dy), ensureMs, stepMs, elapsedMs, budgetMs))
+
+                // [3] 350ms wall-clock budget for correction attempts (attempt 1+):
+                // stop immediately, snap to best below.
+                if attempt > 0, budgetMs > wallClockBudgetMs {
+                    print("[\(tag)] budget exceeded (\(Int(budgetMs))ms after attempt 0) — stopping, snapping to best")
+                    break
+                }
+                guard abs(charDiff) > 300, attempt < maxAttempts - 1 else { break }
+
+                let correctedY = min(max(0, y + dy), maxOffset)
+                prevY = y
+                prevCharIdx = landedCharIdx
+                guard abs(correctedY - y) > 0.5 else { break }
+                y = correctedY
+            }
+
+            if bestCharIdx != landedCharIdx, bestAbsDiff < abs(targetCharIdx - landedCharIdx) {
+                y = bestY
+                landedCharIdx = bestCharIdx
+                landedProgress = totalChars > 0 ? min(max(Double(bestCharIdx) / Double(totalChars), 0), 1) : 0
+                isScrollingProgrammatically = true
+                tv.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+                isScrollingProgrammatically = false
+                print(String(format: "[\(tag)] reverted to best charIdx=%d y=%.0f", bestCharIdx, Double(y)))
+            }
+            print(String(format: "[\(tag)] TOTAL elapsed=%.0fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+
+            return (y, landedCharIdx, landedProgress)
+        }
+
         private func applySeek(_ target: Double, in textView: UITextView, trigger: StaticString = "unknown") {
             guard target != lastAppliedSeekTarget else { return }
             lastAppliedSeekTarget = target
             print(String(format: "[SEEK] trigger=%@ target=%.4f currentOffsetY=%.0f",
                          "\(trigger)" as NSString, target, textView.contentOffset.y))
 
-            // Always use TextKit's own contentSize as the coordinate space.
-            // Using a CoreText-measured height (which may differ from TextKit's estimate)
-            // causes blank screen: ensureLayout(forBoundingRect:) operates in TextKit's
-            // coordinate space, so a rawY past TextKit's extent lays out no glyphs.
-            //
-            // WHY NOT glyphIndexForCharacter + ensureLayout(forGlyphRange:):
-            //   glyphIndexForCharacter(at: N) must process chars 0..N sequentially to
-            //   build the character→glyph map.  For N ≈ 3.4M this is O(N) — multi-second
-            //   freeze regardless of NCL.
-            //
-            // ensureLayout(forBoundingRect:) is O(local) in NCL mode: TextKit uses its
-            // per-paragraph height estimates to jump to the target strip and lay out only
-            // that strip.  The target Y must be in TextKit's own coordinate space.
+            // Proportional pixel estimate — the landing loop's setContentOffset+
+            // ensureLayout+layoutIfNeeded+glyphRange(forBoundingRect:) steps
+            // establish whatever layout is needed for wherever we actually land.
             let tkH = textView.contentSize.height
             guard tkH > textView.bounds.height else { return }
             let maxOffset = tkH - textView.bounds.height
             let rawY = tkH * target
-            let lm = textView.layoutManager
-            let tc = textView.textContainer
-            let inset = textView.textContainerInset.top
-            let viewH = max(textView.bounds.height, 100)
-            let ensureRect = CGRect(x: 0,
-                                    y: max(0, rawY - inset - viewH * 0.5),
-                                    width: tc.size.width,
-                                    height: viewH * 2)
-            lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
             let targetY = min(max(0, rawY), maxOffset)
 
             guard abs(textView.contentOffset.y - targetY) > 1 else { return }
             isSeeking = true
             let total = stableCharCount > 0 ? stableCharCount : textView.textStorage.length
             let targetCharIdx = Int(target * Double(max(1, total)))
-            // Landing verification: max 3 retries with glyphRange (NCL-safe).
-            var seekY = targetY
-            for attempt in 0..<3 {
-                isScrollingProgrammatically = true
-                textView.setContentOffset(CGPoint(x: 0, y: seekY), animated: false)
-                isScrollingProgrammatically = false
-                let visRect = CGRect(x: 0, y: max(0, seekY - inset), width: tc.size.width, height: viewH)
-                let gr = lm.glyphRange(forBoundingRect: visRect, in: tc)
-                guard gr.location != NSNotFound, gr.length > 0, total > 0 else { break }
-                let charIdx = lm.characterIndexForGlyph(at: gr.location)
-                let landedProgress = min(max(Double(charIdx) / Double(total), 0), 1)
-                let diff = target - landedProgress
-                if attempt == 0 {
-                    let capturedVM = vm
-                    Task { @MainActor in capturedVM?.rebasePage(atCharIdx: charIdx, totalChars: total) }
-                    postSeekExclude = true
+
+            // A big jump used to block the main thread for seconds-to-minutes; that
+            // was font-attribute fixing, now fixed at the source (see landingLoop's
+            // doc comment). The spinner stays as a safety net for any residual
+            // stall. TWO nested dispatches, not one: applySeek can run
+            // synchronously from within a SwiftUI view-update pass (e.g. a progress-
+            // bar drag driving `progress` → syncProgress → applySeek), so setting
+            // isPositioning here directly triggers "Publishing changes from within
+            // view updates". The first hop moves the flag-set itself outside that
+            // update pass; the second hop is what actually gives SwiftUI a render
+            // in between to draw the spinner BEFORE the block starts.
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.vm?.isPositioning = true
+                DispatchQueue.main.async { [weak self, weak textView] in
+                    guard let self, let textView else { return }
+                    // [2] Unified with didLayout's restore loop — same secant method,
+                    // same safety guards. Previously applySeek used a fixed cpp/pageStep
+                    // ratio (correctionDelta), which is why [SEEK] logs never showed a density.
+                    let result = self.landingLoop(tv: textView, startY: targetY, targetCharIdx: targetCharIdx,
+                                                  totalChars: total, tag: "SEEK") { charIdx, _ in
+                        let capturedVM = self.vm
+                        Task { @MainActor in capturedVM?.rebasePage(atCharIdx: charIdx, totalChars: total) }
+                        self.postSeekExclude = true
+                    }
+                    self.vm?.isPositioning = false
+
+                    os_log("[NCL-3] applySeek-done allow=%d has=%d vo=%d target=%.3f offsetY=%.0f",
+                       log: spLog, type: .info,
+                       textView.layoutManager.allowsNonContiguousLayout ? 1 : 0,
+                       textView.layoutManager.hasNonContiguousLayout ? 1 : 0,
+                       UIAccessibility.isVoiceOverRunning ? 1 : 0,
+                       target, result.y)
+                    DispatchQueue.main.async { [weak self] in self?.isSeeking = false }
                 }
-                guard abs(diff) > 0.0001, attempt < 2 else { break }
-                // Local-density correction (see correctionDelta) — replaces the
-                // former diff*tkH global-average conversion, which under-corrected
-                // by roughly 11x whenever local density differed from the whole
-                // document's average.
-                let dy = correctionDelta(targetChar: targetCharIdx, landedChar: charIdx)
-                let correctedY = min(max(0, seekY + dy), targetY + viewH)
-                guard abs(correctedY - seekY) > 0.5 else { break }
-                seekY = correctedY
-                let refRect = CGRect(x: 0, y: max(0, seekY - inset - viewH * 0.5),
-                                     width: tc.size.width, height: viewH * 2)
-                lm.ensureLayout(forBoundingRect: refRect, in: tc)
             }
-            os_log("[NCL-3] applySeek-done allow=%d has=%d vo=%d target=%.3f offsetY=%.0f",
-                   log: spLog, type: .info,
-                   textView.layoutManager.allowsNonContiguousLayout ? 1 : 0,
-                   textView.layoutManager.hasNonContiguousLayout ? 1 : 0,
-                   UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                   target, targetY)
-            DispatchQueue.main.async { [weak self] in self?.isSeeking = false }
         }
 
         private var pendingRestoreTarget: Double?
@@ -1554,109 +1693,67 @@ struct NativeTextView: UIViewRepresentable {
             if tkH > tv.bounds.height {
                 let capturedTarget = target
                 cancelRestore()
-                // CRITICAL: call ensureLayout before setContentOffset.
-                // With allowsNonContiguousLayout=true, TextKit only lays out the visible
-                // region. Calling setContentOffset to an unlaid-out region causes UITextView
-                // to reject the jump and snap back to contentOffset=(0,0), showing the first
-                // page regardless of the saved progress value.
-                // ensureLayout forces TextKit to lay out the strip around the target Y,
-                // then setContentOffset safely lands there.
-                let lm = tv.layoutManager
-                let tc = tv.textContainer
-                let inset = tv.textContainerInset.top
-                let viewH = max(tv.bounds.height, 100)
+                // Proportional pixel estimate — the landing loop's setContentOffset+
+                // ensureLayout+layoutIfNeeded+glyphRange(forBoundingRect:) steps
+                // establish whatever layout is needed for wherever we actually land.
                 let rawY = tkH * capturedTarget
-                let ensureRect = CGRect(x: 0,
-                                        y: max(0, rawY - inset - viewH * 0.5),
-                                        width: tc.size.width,
-                                        height: viewH * 2)
-                let _restoreT0 = CFAbsoluteTimeGetCurrent()
-                let _tEnsure0 = CFAbsoluteTimeGetCurrent()
-                lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
-                print(String(format: "[R] ensureLayout(initial) %.0fms rawY=%.0f",
-                             (CFAbsoluteTimeGetCurrent() - _tEnsure0) * 1000, rawY))
-                let maxOffset = tkH - tv.bounds.height
-                // NCL-safe restore: use pixel proportional estimate for initial placement,
-                // then verify via glyphRange(forBoundingRect:) — which only touches the
-                // already-laid-out visible region — and correct iteratively (max 3 tries).
-                // Avoids glyphIndexForCharacter(at:N) which is O(N) and freezes on large docs.
                 let totalChars = stableCharCount > 0 ? stableCharCount : tv.textStorage.length
                 let targetCharIdx = Int(capturedTarget * Double(max(1, totalChars)))
-                var refinedY = min(max(0, rawY), maxOffset)
-                var landedCharIdx = 0
-                var landedProgress = 0.0
-                for attempt in 0..<3 {
-                    let _tSet0 = CFAbsoluteTimeGetCurrent()
-                    isScrollingProgrammatically = true
-                    tv.setContentOffset(CGPoint(x: 0, y: refinedY), animated: false)
-                    isScrollingProgrammatically = false
-                    print(String(format: "[R] setContentOffset(y=%.0f) %.0fms",
-                                 refinedY, (CFAbsoluteTimeGetCurrent() - _tSet0) * 1000))
-                    let _tLayoutIfNeeded0 = CFAbsoluteTimeGetCurrent()
-                    tv.layoutIfNeeded()
-                    print(String(format: "[R] layoutIfNeeded %.0fms",
-                                 (CFAbsoluteTimeGetCurrent() - _tLayoutIfNeeded0) * 1000))
-                    // Measure actual landing position (visible glyphs are always laid out).
-                    let _tGlyph0 = CFAbsoluteTimeGetCurrent()
-                    let visRect = CGRect(x: 0, y: max(0, refinedY - inset),
-                                        width: tc.size.width, height: viewH)
-                    let gr = lm.glyphRange(forBoundingRect: visRect, in: tc)
-                    if gr.location != NSNotFound, gr.length > 0, totalChars > 0 {
-                        landedCharIdx = lm.characterIndexForGlyph(at: gr.location)
-                        landedProgress = min(max(Double(landedCharIdx) / Double(totalChars), 0), 1)
+
+                // This first restore used to block the main thread for ~3s on a
+                // 7.8M-char book. That was font-attribute fixing, not layout — fixed
+                // at the source (see landingLoop's doc comment); now ~100ms. The
+                // spinner stays as a safety net for any residual stall.
+                // TWO nested dispatches, not one: didLayout runs synchronously from
+                // within a SwiftUI view-update pass, so setting isPositioning here
+                // directly triggers "Publishing changes from within view updates".
+                // The first hop moves the flag-set itself outside that update pass;
+                // the second hop is what actually gives SwiftUI a render in between
+                // to draw the spinner BEFORE the multi-second block starts — doing
+                // both in the same hop would still freeze with no visible feedback.
+                DispatchQueue.main.async { [weak self, weak tv] in
+                    guard let self, let tv else { return }
+                    self.vm?.isPositioning = true
+                    DispatchQueue.main.async { [weak self, weak tv] in
+                        guard let self, let tv else { return }
+                        // [2] Unified with applySeek's landing loop — same secant
+                        // method, same safety guards (350ms budget, asymmetric dy
+                        // clamp, density validity range).
+                        _ = self.landingLoop(tv: tv, startY: rawY, targetCharIdx: targetCharIdx,
+                                             totalChars: totalChars, tag: "RESTORE")
+                        self.vm?.isPositioning = false
+                    // Use capturedTarget (= saved charIndex / totalChars) as the
+                    // authoritative progress value, not the landed measurement — see
+                    // prior Newton-loop-drift note: measuring progress off the CURRENT
+                    // pixel position accumulates rounding error across close/open
+                    // cycles instead of using the exact value that was saved.
+                    self.lastReportedProgress = capturedTarget
+                    self.progress = capturedTarget
+                    // Probe (2): didLayout restore complete.
+                    let lmD = tv.layoutManager
+                    os_log("[NCL-2] didLayout-done allow=%d has=%d vo=%d offsetY=%.0f",
+                           log: spLog, type: .info,
+                           lmD.allowsNonContiguousLayout ? 1 : 0,
+                           lmD.hasNonContiguousLayout ? 1 : 0,
+                           UIAccessibility.isVoiceOverRunning ? 1 : 0,
+                           tv.contentOffset.y)
+                    // Close Open-FirstLayout and Open-EndToEnd — both paired from applyContent/performLoad.
+                    let flID = OpenSignpostState.shared.firstLayoutID
+                    os_signpost(.end, log: spLog, name: "Open-FirstLayout", signpostID: flID,
+                                "offsetY=%.0f", tv.contentOffset.y)
+                    print(String(format: "[TIME] Open-FirstLayout %.0f ms  offsetY=%.0f",
+                                 (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.firstLayoutT0) * 1000, tv.contentOffset.y))
+                    let e2eID = OpenSignpostState.shared.endToEndID
+                    os_signpost(.end, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
+                                "offsetY=%.0f has=%d", tv.contentOffset.y,
+                                lmD.hasNonContiguousLayout ? 1 : 0)
+                    print(String(format: "[TIME] Open-EndToEnd %.0f ms  offsetY=%.0f has=%d",
+                                 (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.endToEndT0) * 1000, tv.contentOffset.y,
+                                 lmD.hasNonContiguousLayout ? 1 : 0))
+                        // Trigger background pagination now that we know the stable bounds.
+                        self.triggerPaginationIfNeeded(tv: tv)
                     }
-                    print(String(format: "[R] glyphRange+characterIndexForGlyph %.0fms charIdx=%d",
-                                 (CFAbsoluteTimeGetCurrent() - _tGlyph0) * 1000, landedCharIdx))
-                    let diff = capturedTarget - landedProgress
-                    print(String(format: "[RESTORE] attempt=%d target=%.4f landed=%.4f diff=%.4f elapsed=%.0fms",
-                                 attempt, capturedTarget, landedProgress, diff,
-                                 (CFAbsoluteTimeGetCurrent() - _restoreT0) * 1000))
-                    guard abs(diff) > 0.0001, attempt < 2 else { break }
-                    // Local-density correction: convert the character-count error to
-                    // points using charsPerPage/pageStep (see correctionDelta), not
-                    // diff*tkH — the latter divides by the WHOLE document's estimated
-                    // height, a global average that under-corrects by ~11x when local
-                    // paragraph density differs from the document-wide average.
-                    let dy = correctionDelta(targetChar: targetCharIdx, landedChar: landedCharIdx)
-                    let correctedY = min(max(0, refinedY + dy), maxOffset)
-                    guard abs(correctedY - refinedY) > 0.5 else { break }
-                    refinedY = correctedY
-                    let _tEnsure1 = CFAbsoluteTimeGetCurrent()
-                    let refRect = CGRect(x: 0, y: max(0, refinedY - inset - viewH * 0.5),
-                                        width: tc.size.width, height: viewH * 2)
-                    lm.ensureLayout(forBoundingRect: refRect, in: tc)
-                    print(String(format: "[R] ensureLayout(retry) %.0fms dy=%.1f cpp=%d pageStep=%.1f",
-                                 (CFAbsoluteTimeGetCurrent() - _tEnsure1) * 1000, dy,
-                                 resolvedCharsPerPage > 0 ? resolvedCharsPerPage : 432,
-                                 resolvedPageStep > 0 ? resolvedPageStep : 648))
                 }
-                print(String(format: "[RESTORE] TOTAL elapsed=%.0fms",
-                             (CFAbsoluteTimeGetCurrent() - _restoreT0) * 1000))
-                lastReportedProgress = capturedTarget
-                progress = capturedTarget
-                // Probe (2): didLayout restore complete.
-                let lmD = tv.layoutManager
-                os_log("[NCL-2] didLayout-done allow=%d has=%d vo=%d offsetY=%.0f",
-                       log: spLog, type: .info,
-                       lmD.allowsNonContiguousLayout ? 1 : 0,
-                       lmD.hasNonContiguousLayout ? 1 : 0,
-                       UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                       tv.contentOffset.y)
-                // Close Open-FirstLayout and Open-EndToEnd — both paired from applyContent/performLoad.
-                let flID = OpenSignpostState.shared.firstLayoutID
-                os_signpost(.end, log: spLog, name: "Open-FirstLayout", signpostID: flID,
-                            "offsetY=%.0f", tv.contentOffset.y)
-                print(String(format: "[TIME] Open-FirstLayout %.0f ms  offsetY=%.0f",
-                             (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.firstLayoutT0) * 1000, tv.contentOffset.y))
-                let e2eID = OpenSignpostState.shared.endToEndID
-                os_signpost(.end, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
-                            "offsetY=%.0f has=%d", tv.contentOffset.y,
-                            lmD.hasNonContiguousLayout ? 1 : 0)
-                print(String(format: "[TIME] Open-EndToEnd %.0f ms  offsetY=%.0f has=%d",
-                             (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.endToEndT0) * 1000, tv.contentOffset.y,
-                             lmD.hasNonContiguousLayout ? 1 : 0))
-                // Trigger background pagination now that we know the stable bounds.
-                triggerPaginationIfNeeded(tv: tv)
                 return
             }
 
@@ -1877,7 +1974,7 @@ struct NativeTextView: UIViewRepresentable {
 
             // Calibration sample collection — [2] filter: 20–2000 range, median,
             // skip the first turn after any seek so a bad delta doesn't corrupt data.
-            if forward, let prev = lastPageCharIdx {
+            if forward, !hasLockedCharsPerPage, let prev = lastPageCharIdx {
                 let delta = charIdx - prev
                 if !postSeekExclude, delta >= 20, delta <= 2000 {
                     pageCharDeltas.append(delta)
@@ -1887,7 +1984,7 @@ struct NativeTextView: UIViewRepresentable {
                                      median, pageCharDeltas.min()!, pageCharDeltas.max()!,
                                      currentProfileKey as NSString))
                         pageCharDeltas.removeAll()
-                        resolvedCharsPerPage = median   // switch density source from seed to measured
+                        hasLockedCharsPerPage = true    // [3]: lock at most once per session
                         let capturedVM2 = vm
                         Task { @MainActor in capturedVM2?.lockCharsPerPage(median, profileKey: currentProfileKey) }
                     }
