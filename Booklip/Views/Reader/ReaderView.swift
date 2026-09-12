@@ -17,8 +17,11 @@ struct ReaderView: View {
     @State private var searchInputText = ""
     @State private var committedSearchQuery = ""
     @State private var searchResultIndex = 0
-    // feature 9: text selection
-    @State private var selectedTextRange: NSRange? = nil
+    // feature 9: highlight mode — when on, the text view allows selection and
+    // the selection edit menu offers "Highlight" (4 colors)
+    @State private var highlightMode = false
+    // Table of contents / bookmarks / highlights sheet
+    @State private var showContents = false
     // feature 7: save progress when app backgrounds
     @Environment(\.scenePhase) private var scenePhase
     // Reading session timer — records elapsed seconds for ReadingStats
@@ -57,7 +60,7 @@ struct ReaderView: View {
                     pageNavigationDirection: $pageNavigationDirection,
                     searchQuery: committedSearchQuery,
                     searchResultIndex: searchResultIndex,
-                    selectedRange: $selectedTextRange,
+                    highlightMode: $highlightMode,
                     autoScrolling: $autoScrolling
                 )
             }
@@ -65,7 +68,10 @@ struct ReaderView: View {
             // Left/right tap zones for page navigation — SwiftUI overlay avoids
             // UIKit gesture-recognizer conflicts (especially in paper mode where
             // the scroll view's pan recognizer is disabled).
-            if !showBars && !vm.isLoading && (book.format != .pdf || settings.pageEffect == .paper) {
+            // Not in highlight mode: these SwiftUI overlays sit above the UIKit
+            // text view and would swallow the long-press/drag needed to select.
+            if !showBars && !highlightMode && !vm.isLoading
+                && (book.format != .pdf || settings.pageEffect == .paper) {
                 HStack(spacing: 0) {
                     Color.clear
                         .contentShape(Rectangle())
@@ -92,12 +98,15 @@ struct ReaderView: View {
                         bottomBar
                     }
                 }
-                // Tapping the content area while bars are visible hides them
+                // Tapping the content area while bars are visible hides them.
+                // Disabled in highlight mode so touches reach the text view for
+                // selection (the text view's own tap recognizer still toggles bars).
                 .background(
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { showBars = false }
                         .ignoresSafeArea()
+                        .allowsHitTesting(!highlightMode)
                 )
             }
 
@@ -124,7 +133,11 @@ struct ReaderView: View {
         .preferredColorScheme(settings.preferredColorScheme)
         .task { vm.load() }
         .onAppear { sessionStart = Date() }
-        .onDisappear { saveProgress() }
+        .onDisappear {
+            saveProgress()
+            tts.stop()
+            autoScrolling = false   // also lets the text view's display link stop
+        }
         // feature 7: save when app goes to background or becomes inactive
         .onChange(of: scenePhase) { _, phase in
             if phase == .background || phase == .inactive { saveProgress() }
@@ -132,6 +145,9 @@ struct ReaderView: View {
         }
         .sheet(isPresented: $showAppearance) { AppearancePanel(settings: settings) }
         .sheet(isPresented: $showTTS) { TTSPanel(tts: tts, vm: vm) }
+        .sheet(isPresented: $showContents) {
+            ContentsPanel(vm: vm) { target in vm.progress = min(max(target, 0), 1) }
+        }
         // feature 1: Tab / arrow keys navigate pages (hardware keyboard on iPad/macOS)
         .focusable()
         .onKeyPress(.tab)        { pageNavigationDirection = 1;  return .handled }
@@ -153,7 +169,7 @@ struct ReaderView: View {
             }
             Spacer()
             // Bookmark button — top-right corner
-            Button { vm.addBookmark() } label: {
+            Button { vm.toggleBookmark() } label: {
                 Image(systemName: vm.isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
                     .font(.headline)
                     .foregroundStyle(vm.isCurrentPositionBookmarked ? Color.accentColor : Color.primary)
@@ -168,7 +184,7 @@ struct ReaderView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            ReadingProgressBar(progress: $vm.progress)
+            ReadingProgressBar(progress: $vm.progress, marks: vm.bookmarks.map(\.progress))
             VStack(spacing: 1) {
                 if let pagProg = vm.paginationProgress {
                     Text("페이지 계산 중 \(Int(pagProg * 100))%")
@@ -215,13 +231,20 @@ struct ReaderView: View {
                     }
                 }
 
-                // feature 9: highlight selected text (text books only)
-                if book.format != .pdf, selectedTextRange != nil {
-                    Button { createHighlight() } label: {
+                // feature 9: highlight mode toggle (text books only). While on,
+                // select text and pick a color from the "Highlight" edit menu.
+                if book.format != .pdf {
+                    Button { highlightMode.toggle() } label: {
                         Image(systemName: "highlighter")
                             .font(.title2)
-                            .foregroundStyle(.yellow)
+                            .foregroundStyle(highlightMode ? Color.yellow : Color.primary)
                     }
+                }
+
+                // Contents / bookmarks / highlights
+                Button { showContents = true } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.title2)
                 }
 
                 Spacer()
@@ -280,21 +303,6 @@ struct ReaderView: View {
 
     // MARK: - Helpers
 
-    // feature 9: create a BookHighlight from the current text selection
-    private func createHighlight() {
-        guard let range = selectedTextRange else { return }
-        let totalChars = vm.plainText.utf16.count
-        guard range.location < totalChars else { return }
-        let safeLen = min(range.length, totalChars - range.location)
-        guard safeLen > 0 else { return }
-        let nsRange = NSRange(location: range.location, length: safeLen)
-        let nsText = vm.plainText as NSString
-        let snippet = String(nsText.substring(with: nsRange).prefix(80))
-        let progress = totalChars > 0 ? Double(range.location) / Double(totalChars) : 0
-        vm.addHighlight(range: nsRange, colorName: "yellow", snippet: snippet, progress: progress)
-        selectedTextRange = nil
-    }
-
     // Page X / Y label shown below the progress bar.
     private var pageLabel: String {
         if book.format == .pdf, let pageCount = vm.pdfDocument?.pageCount, pageCount > 0 {
@@ -334,16 +342,21 @@ struct ReaderView: View {
     // feature 7: persist progress and record reading time
     private func saveProgress() {
         // Save exact UTF-16 character index so restore can set progress without
-        // floating-point round-trip error. PDF books don't use charIndex.
-        let charIndex: Int = book.format != .pdf
-            ? Int(vm.progress * Double(vm.plainText.utf16.count))
-            : 0
+        // floating-point round-trip error. nil when unknown (PDF, or the text is
+        // not loaded yet — e.g. the scene went inactive mid-parse) so a stale
+        // stored index isn't clobbered with 0; a real 0 (start of book) is saved.
+        let charCount = vm.plainText.utf16.count
+        let charIndex: Int? = (book.format != .pdf && charCount > 0)
+            ? Int(vm.progress * Double(charCount))
+            : nil
         library.updateProgress(for: book.id, progress: vm.progress, charIndex: charIndex)
         if let start = sessionStart {
             ReadingStats.record(seconds: Date().timeIntervalSince(start))
             sessionStart = nil
         }
-        tts.stop()
+        // NOTE: TTS is deliberately NOT stopped here. saveProgress also runs on
+        // scenePhase .inactive (lock screen, Control Center, call banner), and
+        // stopping there killed background listening and the sleep timer.
     }
 }
 

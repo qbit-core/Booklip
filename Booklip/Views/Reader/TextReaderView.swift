@@ -35,9 +35,8 @@ struct TextReaderView: View {
     @Binding var pageNavigationDirection: Int
     var searchQuery: String = ""
     var searchResultIndex: Int = 0
-    @Binding var selectedRange: NSRange?
+    @Binding var highlightMode: Bool
     @Binding var autoScrolling: Bool
-    @State private var highlightMode = false
 #if os(macOS)
     @StateObject private var eventChannel = TextViewEventChannel()
 #endif
@@ -52,6 +51,11 @@ struct TextReaderView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onReceive(eventChannel.$scrollProgress.dropFirst()) { vm.progress = $0 }
             .onReceive(eventChannel.$tapCount.dropFirst()) { _ in showBars.toggle() }
+            .onReceive(eventChannel.$highlightRequest.dropFirst()) { req in
+                guard let req else { return }
+                vm.addHighlight(range: req.range, colorName: req.colorName,
+                                snippet: req.snippet, progress: req.progress)
+            }
 #else
         nativeTextView(progress: $vm.progress)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -115,6 +119,11 @@ struct TextReaderView: View {
 final class TextViewEventChannel: ObservableObject {
     @Published var scrollProgress: Double = 0
     @Published var tapCount: Int = 0
+    // "Highlight" chosen from the NSTextView context menu. Routed through the
+    // channel (weakly held by the coordinator) rather than a closure so the
+    // coordinator never captures the view model.
+    struct HighlightRequest { let range: NSRange; let colorName: String; let snippet: String; let progress: Double }
+    @Published var highlightRequest: HighlightRequest? = nil
 }
 #endif
 
@@ -164,6 +173,7 @@ struct NativeTextView: NSViewRepresentable {
         let recognizer = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
         recognizer.numberOfClicksRequired = 1
         textView.addGestureRecognizer(recognizer)
+        textView.delegate = context.coordinator   // context menu → "Highlight" submenu
         context.coordinator.scrollView = scrollView
         NotificationCenter.default.addObserver(
             context.coordinator,
@@ -193,8 +203,10 @@ struct NativeTextView: NSViewRepresentable {
                 let bucket = (Int(textView.bounds.width) / 50) * 50
                 return "blocks-\(blocks.count)-w\(bucket)"
             }
-            return text.map { "txt-\($0.count)" }
-                ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
+            // utf16.count is O(1) (breadcrumbs) after the first call; String.count
+            // is an uncached O(N) grapheme walk that ran on every update pass.
+            return text.map { "txt-\($0.utf16.count)" }
+                ?? "attr-\(attributedText.map { $0.characters.count } ?? 0)"
         }()
 
         let macLayoutChanged = context.coordinator.lastLayoutKey != macLayoutKey
@@ -369,13 +381,47 @@ struct NativeTextView: NSViewRepresentable {
         textView.backgroundColor = NSColor(settings.currentPreset.background)
     }
 
-    class Coordinator: NSObject {
+    class Coordinator: NSObject, NSTextViewDelegate {
         // Weak references only — coordinator can outlive the SwiftUI view hierarchy
         // (AppKit retains it via the gesture recognizer on NSTextView). Using weak
         // references means all writes become no-ops after the view is dismantled,
         // regardless of teardown order. No closures, no @Binding captures.
         weak var eventChannel: TextViewEventChannel?
         weak var scrollView: NSScrollView?
+
+        // Context menu on a selection gets a "Highlight" submenu (4 colors). This
+        // is the macOS path for creating highlights; iOS uses the edit menu.
+        func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+            let sel = view.selectedRange()
+            guard sel.length > 0 else { return menu }
+            let sub = NSMenu(title: "Highlight")
+            for hc in HighlightColor.allCases {
+                let item = NSMenuItem(title: hc.rawValue.capitalized,
+                                      action: #selector(highlightMenuAction(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = hc.rawValue
+                sub.addItem(item)
+            }
+            let parent = NSMenuItem(title: "Highlight", action: nil, keyEquivalent: "")
+            parent.submenu = sub
+            menu.insertItem(NSMenuItem.separator(), at: 0)
+            menu.insertItem(parent, at: 0)
+            return menu
+        }
+
+        @objc private func highlightMenuAction(_ sender: NSMenuItem) {
+            guard let colorName = sender.representedObject as? String,
+                  let tv = scrollView?.documentView as? NSTextView,
+                  let storage = tv.textStorage else { return }
+            let sel = tv.selectedRange()
+            guard sel.length > 0, sel.location < storage.length else { return }
+            let safe = NSRange(location: sel.location, length: min(sel.length, storage.length - sel.location))
+            let snippet = String((storage.string as NSString).substring(with: safe).prefix(80))
+            let prog = Double(safe.location) / Double(max(1, storage.length))
+            eventChannel?.highlightRequest = .init(range: safe, colorName: colorName,
+                                                   snippet: snippet, progress: prog)
+            tv.setSelectedRange(NSRange(location: safe.location, length: 0))
+        }
         var isScrollingProgrammatically = false
         var isDismantled = false
         private var lastHighlight: NSRange?
@@ -590,6 +636,15 @@ struct NativeTextView: UIViewRepresentable {
         Coordinator(progress: $progress, autoScrolling: $autoScrolling, onTap: onTap)
     }
 
+    static func dismantleUIView(_ uiView: UITextView, coordinator: Coordinator) {
+        // CADisplayLink(target: self) retains the coordinator, so deinit can never
+        // run while auto-scroll is on — dismissing the reader mid-auto-scroll leaked
+        // the coordinator (and via its closures the view model with the whole book)
+        // and left a display link firing every frame for the process lifetime.
+        coordinator.setAutoScrolling(false)
+        coordinator.currentSearchTask?.cancel()
+    }
+
     func makeUIView(context: Context) -> UITextView {
         // Force TextKit 1 (accessing layoutManager opts out of TextKit 2),
         // which scrolls very large documents more smoothly and avoids the
@@ -665,8 +720,11 @@ struct NativeTextView: UIViewRepresentable {
         let colorKey = "\(settings.presetId)|hl\(highlights.count)"
         let contentKey: String = {
             if !blocks.isEmpty { return "blocks-\(blocks.count)" }
-            return text.map { "txt-\($0.count)" }
-                ?? "attr-\(attributedText.map { NSAttributedString($0).length } ?? 0)"
+            // stableCharCount is the already-known UTF-16 length; String.count was
+            // an uncached O(N) grapheme walk on every update pass (tens of ms on a
+            // multi-MB book, hit on every scroll settle / TTS sentence / pagination tick).
+            return text.map { _ in "txt-\(stableCharCount)" }
+                ?? "attr-\(attributedText.map { $0.characters.count } ?? 0)"
         }()
 
         let layoutChanged = context.coordinator.lastLayoutKey != layoutKey
@@ -1184,7 +1242,12 @@ struct NativeTextView: UIViewRepresentable {
             vm.textAreaSize = CGSize(width: textAreaW, height: textAreaH)
 
             // [PAGE-STEP] log — fire once per layout key change.
-            let fontName = settings.useEmbeddedFont ? (vm.embeddedFontName ?? settings.fontName) : settings.fontName
+            // Must be the font that actually renders (see FontRegistrar.effectiveFontName),
+            // or the charsPerPage profile is stored under the wrong font name and a
+            // different book rendered in that font inherits the wrong calibration.
+            let fontName = FontRegistrar.effectiveFontName(
+                settings.useEmbeddedFont ? (vm.embeddedFontName ?? settings.fontName) : settings.fontName,
+                sample: vm.plainText)
             let layoutKey = "\(vm.book.id)|\(fontName)|\(settings.fontSize)|\(settings.lineSpacing)|\(Int(tv.bounds.width))x\(Int(tv.bounds.height))"
             if layoutKey != lastPaginationKey {
                 let fontSize   = max(1.0, settings.fontSize)
@@ -1463,7 +1526,7 @@ struct NativeTextView: UIViewRepresentable {
         private func landingLoop(
             tv: UITextView, startY: CGFloat, targetCharIdx: Int, totalChars: Int,
             tag: String, maxAttempts: Int = 8, wallClockBudgetMs: Double = 350,
-            onFirstLanding: ((Int, Double) -> Void)? = nil
+            onLanded: ((Int, Double) -> Void)? = nil
         ) -> (y: CGFloat, charIdx: Int, progress: Double) {
             let lm = tv.layoutManager
             let tc = tv.textContainer
@@ -1527,8 +1590,6 @@ struct NativeTextView: UIViewRepresentable {
                     landedCharIdx = lm.characterIndexForGlyph(at: gr.location)
                     landedProgress = min(max(Double(landedCharIdx) / Double(totalChars), 0), 1)
                 }
-                if attempt == 0 { onFirstLanding?(landedCharIdx, landedProgress) }
-
                 let charDiff = targetCharIdx - landedCharIdx
                 if abs(charDiff) < bestAbsDiff {
                     bestAbsDiff = abs(charDiff)
@@ -1624,6 +1685,10 @@ struct NativeTextView: UIViewRepresentable {
             }
             print(String(format: "[\(tag)] TOTAL elapsed=%.0fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
 
+            // Report the FINAL landing. This used to fire after attempt 0, whose
+            // proportional guess can be far off (e.g. 0.2% for a 5% target), so the
+            // page label was rebased to the wrong page after every seek.
+            onLanded?(landedCharIdx, landedProgress)
             return (y, landedCharIdx, landedProgress)
         }
 

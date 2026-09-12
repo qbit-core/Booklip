@@ -134,6 +134,8 @@ class ReaderViewModel: ObservableObject {
                 let result = try await BookPaginator.shared.compute(text: text, key: key) { fraction in
                     Task { @MainActor in self.paginationProgress = fraction }
                 }
+                // A superseded run must not overwrite the current key's result.
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.pageStarts = result
                     self.paginationProgress = nil
@@ -193,8 +195,36 @@ class ReaderViewModel: ObservableObject {
         BookStore.saveBookmarks(bookmarks, for: book.id)
     }
 
-    var isCurrentPositionBookmarked: Bool {
-        bookmarks.contains { abs($0.progress - progress) < 0.005 }
+    /// Bookmark button semantics: tapping on a page that already holds a
+    /// bookmark removes it; otherwise adds one. (Previously every tap appended
+    /// another bookmark at the same spot.)
+    func toggleBookmark() {
+        if let existing = bookmarkAtCurrentPosition {
+            deleteBookmark(existing)
+        } else {
+            addBookmark()
+        }
+    }
+
+    /// "Same position" = within about one page. The old fixed 0.5% tolerance
+    /// spanned ~140 pages on a 7.8M-char book, so the icon read as bookmarked
+    /// long before and after the actual mark.
+    private var bookmarkTolerance: Double {
+        estimatedTotalPages > 0 ? 1.0 / Double(estimatedTotalPages) : 0.001
+    }
+
+    var bookmarkAtCurrentPosition: Bookmark? {
+        let tol = bookmarkTolerance
+        return bookmarks.min { abs($0.progress - progress) < abs($1.progress - progress) }
+            .flatMap { abs($0.progress - progress) < tol ? $0 : nil }
+    }
+
+    var isCurrentPositionBookmarked: Bool { bookmarkAtCurrentPosition != nil }
+
+    /// 1-based page number for a progress value, when a page count is known.
+    func pageNumber(at p: Double) -> Int? {
+        guard estimatedTotalPages > 0 else { return nil }
+        return min(estimatedTotalPages, Int(p * Double(estimatedTotalPages)) + 1)
     }
 
     func load() {

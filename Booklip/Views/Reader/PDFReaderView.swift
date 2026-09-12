@@ -283,9 +283,15 @@ private struct ContinuousPDFView: UIViewRepresentable {
             if let first = searchOverlays.first {
                 let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
                 let targetY = min(max(0, first.frame.minY - 60), maxOffset)
-                isScrollingProgrammatically = true
-                scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
-                // isScrollingProgrammatically is reset in scrollViewDidEndScrollingAnimation
+                // UIScrollView does NOT call scrollViewDidEndScrollingAnimation when
+                // the target equals the current offset (nothing animates) — setting
+                // the flag then left it stuck and every later seek/progress commit
+                // was ignored for the session. Only animate when there is a move.
+                if abs(scrollView.contentOffset.y - targetY) > 0.5 {
+                    isScrollingProgrammatically = true
+                    scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
+                    // reset in scrollViewDidEndScrollingAnimation
+                }
             }
         }
 

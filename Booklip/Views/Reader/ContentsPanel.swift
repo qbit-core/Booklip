@@ -75,8 +75,8 @@ struct ContentsPanel: View {
                                 Image(systemName: "bookmark.fill").foregroundStyle(.orange)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(mark.snippet.isEmpty ? "Bookmark" : mark.snippet)
-                                        .font(.subheadline).lineLimit(2)
-                                    Text("\(Int(mark.progress * 100))%  ·  \(mark.date.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(snippetFont).lineLimit(2)
+                                    Text(bookmarkSubtitle(mark))
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
@@ -89,6 +89,19 @@ struct ContentsPanel: View {
                 }
             }
         }
+    }
+
+    /// Snippets are slices of the book text. Books that ship a scrambled-
+    /// codepoint anti-copy font are only legible in that embedded font, so use
+    /// it for snippet text when the book has one.
+    private var snippetFont: Font {
+        vm.embeddedFontName.map { Font.custom($0, size: 15) } ?? .subheadline
+    }
+
+    private func bookmarkSubtitle(_ mark: Bookmark) -> String {
+        let pct = "\(Int(mark.progress * 100))%"
+        let page = vm.pageNumber(at: mark.progress).map { "p. \($0)  ·  " } ?? ""
+        return "\(page)\(pct)  ·  \(mark.date.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private var highlightsList: some View {
@@ -107,7 +120,7 @@ struct ContentsPanel: View {
                                     .fill((HighlightColor(rawValue: h.colorName)?.color ?? .yellow).opacity(0.6))
                                     .frame(width: 14, height: 14).padding(.top, 3)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(h.snippet).font(.subheadline).lineLimit(3)
+                                    Text(h.snippet).font(snippetFont).lineLimit(3)
                                     Text("\(Int(h.progress * 100))%")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }

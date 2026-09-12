@@ -54,13 +54,16 @@ with `Co-Authored-By: Claude <noreply@anthropic.com>`.
 ## Features (all implemented)
 Formats: **.txt .epub .pdf .md**. Library: folders, sort, grid/list view modes,
 multi-select move/delete, real EPUB covers. Reader: customizable
-font/size/spacing/color/theme (per-book memory), page-turn effects
-(vertical slide / paper), tap zones + left/right swipe paging, **auto-scroll**,
-nested **table of contents** (NCX/nav), **bookmarks**, **highlights** (4 colors,
-selection mode), reading-position restore. **TTS** (en-US + ko-KR voices,
-speed/pitch, word highlight + follow, sleep timer). **Reading stats**
-(time + streak). **Cloud import** via OAuth (Dropbox, Google Drive; OneDrive
-coded but commented out in `CloudConnectView`).
+font/size/spacing/color/theme (global; `BookStore.BookSettings` exists but is
+not wired), page-turn effects (vertical slide / paper), tap zones + left/right
+swipe paging, **auto-scroll**, nested **table of contents** (NCX/nav),
+**bookmarks**, **highlights** (4 colors; iOS: highlight-mode toggle in the
+bottom bar → select → "Highlight" edit menu; macOS: select → context menu),
+`ContentsPanel` (TOC / bookmarks / highlights) from the list button,
+reading-position restore. **TTS** (en-US + ko-KR voices, speed/pitch, word
+highlight + follow, sleep timer). **Reading stats** (time + streak).
+**Cloud import** via OAuth (Dropbox, Google Drive, OneDrive — all live;
+listings follow pagination cursors).
 
 ## Key decisions & gotchas (don't relearn these)
 - **Reader opens as a full-screen cover** (`readerCover`, iOS `fullScreenCover` /
@@ -71,7 +74,20 @@ coded but commented out in `CloudConnectView`).
   `isSelectable = false` normally (tap = paging); true only in highlight mode.
 - **Progress is character-based**, not pixel-based: `charProgress` =
   characterIndex-at-top / textStorage.length. Pixel offsets are unreliable
-  because TextKit only *estimates* content height until laid out.
+  because TextKit only *estimates* content height until laid out. (The macOS
+  path still uses pixel offsets — known gap.)
+- **One index space.** `ReaderViewModel.plainText` is index-for-index identical
+  to the text view's `NSTextStorage`: `EPUBParser` emits `text + "\n\n"` per
+  text block and `EPUBParser.imagePlaceholder` (U+FFFC + "\n\n") per image,
+  exactly what `applyContent` inserts. Every offset (TTS `spokenRange`,
+  `Chapter.progress`, saved `charIndex`, highlights) relies on this — never
+  trim or reshape one side without the other.
+- **Big-book stalls were font fixing, not layout.** A base font without glyphs
+  for the text (Georgia on Korean) makes TextKit insert per-run substitute
+  fonts (quadratic memmove) inside ensureLayout — 173 s seeks. `FontRegistrar.
+  effectiveFontName` swaps to a covering font; `landingLoop` uses an exact
+  `ensureLayout(forCharacterRange:)` probe (0–1 ms). `sample <pid>` before
+  trusting layout timings.
 - **Paging is character-based** (`page()`): pick the glyph near the view's bottom
   and scroll so it sits at top. Before measuring, `ensureLayout(forBoundingRect:)`
   on the reference region (from the current frontier downward) so the glyph isn't
@@ -85,11 +101,17 @@ coded but commented out in `CloudConnectView`).
   embedded fonts, de-obfuscates (IDPF SHA-1 / Adobe UUID key, XOR of first
   1040/1024 bytes) using the package unique-identifier, registers via CoreText,
   and renders body text in that font (toggle: Appearance → "Use book's font").
-- **TTS** must be chunked (≤~500 chars at paragraph/sentence boundaries) or
-  AVSpeechSynthesizer crashes on whole-EPUB utterances.
+- **TTS** must be chunked (≤500 chars; `TTSManager.maxChunkLength`, paragraphs
+  subdivided at sentence boundaries) or AVSpeechSynthesizer crashes on
+  whole-document utterances. TTS is stopped only on reader dismissal, never on
+  scenePhase `.inactive` (lock screen / Control Center must not kill playback).
+- **Progress save**: `charIndex` is `nil` when unknown (PDF, text not loaded)
+  and a real `0` when at the start — `LibraryViewModel.updateProgress` stores
+  any non-nil value.
 - **Concurrency**: default-main-actor is on; background types (parsers,
-  `OPFDelegate`, `NCXDelegate`, cloud service classes) are marked `nonisolated`.
-  ObservableObject classes need explicit `import Combine`.
+  `OPFDelegate`, `NCXDelegate`) are marked `nonisolated`; cloud service classes
+  are main-actor ObservableObjects. ObservableObject classes need explicit
+  `import Combine`.
 
 ## Cloud / OAuth
 - OAuth 2.0 + **PKCE** (`OAuthSession`, `ASWebAuthenticationSession` with

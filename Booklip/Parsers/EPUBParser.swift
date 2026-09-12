@@ -17,9 +17,18 @@ struct EPUBParser: BookParser, Sendable {
         pattern: #"<script[^>]*>[\s\S]*?</script>"#, options: .caseInsensitive)
     private static let reStyle = try! NSRegularExpression(
         pattern: #"<style[^>]*>[\s\S]*?</style>"#, options: .caseInsensitive)
+    // <head> (and a stray <title> outside it) carry no body text; without this the
+    // document title was prepended to every chapter's text.
+    private static let reHead = try! NSRegularExpression(
+        pattern: #"<head[^>]*>[\s\S]*?</head>"#, options: .caseInsensitive)
+    private static let reTitle = try! NSRegularExpression(
+        pattern: #"<title[^>]*>[\s\S]*?</title>"#, options: .caseInsensitive)
     private static let reBlock = try! NSRegularExpression(
         pattern: #"</?(p|div|br|h[1-6]|li|tr)[^>]*>"#, options: .caseInsensitive)
     private static let reTags = try! NSRegularExpression(pattern: #"<[^>]+>"#)
+    /// What one image block occupies in plainText — must match what the text
+    /// view inserts for an `.image` block (NSTextAttachment = U+FFFC, then "\n\n").
+    static let imagePlaceholder = "\u{FFFC}\n\n"
     private static let reBlankLines = try! NSRegularExpression(pattern: #"\n{3,}"#)
     private static let reNumEntity = try! NSRegularExpression(
         pattern: #"&#(x[0-9a-fA-F]+|\d+);"#, options: .caseInsensitive)
@@ -109,11 +118,18 @@ struct EPUBParser: BookParser, Sendable {
         var chapterRaws: [ChapterRaw] = []
         chapterRaws.reserveCapacity(spineHrefs.count)
         for (i, href) in spineHrefs.enumerated() {
-            let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
+            // resolvePath percent-decodes and collapses "../" — raw concatenation
+            // silently dropped chapters whose manifest href was "Text/Ch%201.xhtml"
+            // or "../Text/ch1.xhtml" (no archive entry matched → try? → continue).
+            let entryPath = resolvePath(href, relativeTo: opfBase)
             let chapterDir = (entryPath as NSString).deletingLastPathComponent
-            guard let html = try? readEntry(entryPath, in: archive, index: entryIndex) else { continue }
+            guard let html = try? readEntry(entryPath, in: archive, index: entryIndex) else {
+                print("[EPUB] spine entry not found in archive: \(entryPath)")
+                continue
+            }
+            let decodedHref = href.removingPercentEncoding ?? href
             let titleHint = firstHeading(in: html)
-                ?? (href as NSString).lastPathComponent
+                ?? (decodedHref as NSString).lastPathComponent
                     .replacingOccurrences(of: ".xhtml", with: "")
                     .replacingOccurrences(of: ".html", with: "")
             var segs: [RawSegment] = []
@@ -124,7 +140,7 @@ struct EPUBParser: BookParser, Sendable {
                 }
             }
             chapterRaws.append(ChapterRaw(
-                hrefKey: (href as NSString).lastPathComponent,
+                hrefKey: (decodedHref as NSString).lastPathComponent,
                 chapterDir: chapterDir,
                 titleHint: titleHint.isEmpty ? nil : titleHint,
                 segments: segs))
@@ -178,11 +194,14 @@ struct EPUBParser: BookParser, Sendable {
         // is replaced with a `[String]` buffer + one `joined()` at the end, so
         // there's no repeated re-copying of the growing string.
         //
-        // Character accounting: only `.text` segments consume characters in
-        // fullText's offset space (`stripped.utf16.count + 2` for the "\n\n"
-        // separator) — Phase 1/3 never insert any placeholder for `.imageSrc`
-        // segments (images only ever become `.image(data)` blocks, no text is
-        // appended for them), so `runningOffset` is left untouched for images.
+        // Character accounting — plainText MUST be the same UTF-16 index space as
+        // the reader's NSTextStorage, which is built from `blocks` as
+        // `text + "\n\n"` per text block and U+FFFC (attachment) + "\n\n" per image
+        // (TextReaderView.applyContent). So each `.text` segment contributes
+        // `stripped.utf16.count + 2` and each image contributes exactly 3
+        // ("\u{FFFC}\n\n"). Previously images contributed nothing here, so every
+        // plainText-space value (TTS spokenRange, Chapter.progress, saved charIndex)
+        // drifted 3 units per preceding image when applied to the storage.
         let _phase3T0 = CFAbsoluteTimeGetCurrent()
         let assembleID = OSSignpostID(log: booklipSpLog)
         os_signpost(.begin, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
@@ -210,9 +229,10 @@ struct EPUBParser: BookParser, Sendable {
                     if let data = try? readData(imgPath, in: archive, index: entryIndex), !data.isEmpty {
                         blocks.append(.image(data))
                         imageBlockCount += 1
+                        // Mirror the storage: attachment char + paragraph break.
+                        parts.append(Self.imagePlaceholder)
+                        runningOffset += Self.imagePlaceholder.utf16.count
                     }
-                    // No characters added — images never appear in fullText's
-                    // offset space, only as their own .image block.
                 }
             }
         }
@@ -235,7 +255,7 @@ struct EPUBParser: BookParser, Sendable {
         if let tocEntries = parseTOC(opf: opf, base: opfBase, archive: archive, index: entryIndex), !tocEntries.isEmpty {
             chapters = tocEntries.compactMap { entry in
                 let file = (entry.href.components(separatedBy: "#").first ?? entry.href as String)
-                let key = (file as NSString).lastPathComponent
+                let key = ((file.removingPercentEncoding ?? file) as NSString).lastPathComponent
                 guard let offset = hrefToOffset[key] else { return nil }
                 return Chapter(title: entry.title,
                                progress: Double(offset) / Double(totalLen),
@@ -248,8 +268,10 @@ struct EPUBParser: BookParser, Sendable {
             }
         }
 
+        // No trimming: the storage keeps the trailing "\n\n" of the last block, and
+        // plainText must stay index-for-index identical to it.
         return ParsedBook(title: opf.title, author: opf.author,
-                          plainText: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
+                          plainText: fullText,
                           blocks: blocks,
                           embeddedFonts: fonts,
                           coverImage: cover,
@@ -620,7 +642,9 @@ struct EPUBParser: BookParser, Sendable {
     nonisolated private func stripHTML(_ html: String) -> String {
         let ms = NSMutableString(string: html)
         func full() -> NSRange { NSRange(location: 0, length: ms.length) }
-        // Remove script/style blocks
+        // Remove head/title/script/style blocks
+        Self.reHead.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
+        Self.reTitle.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
         Self.reScript.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
         Self.reStyle.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
         // Block elements → newlines
@@ -767,6 +791,7 @@ nonisolated private final class OPFDelegate: NSObject, XMLParserDelegate {
 nonisolated private final class NCXDelegate: NSObject, XMLParserDelegate {
     var entries: [EPUBParser.TOCEntry] = []
     private var depth = 0
+    private var inNavLabel = false
     private var capturingLabel = false
     private var labelBuffer = ""
     private var pendingTitle: String?
@@ -778,7 +803,14 @@ nonisolated private final class NCXDelegate: NSObject, XMLParserDelegate {
         switch local {
         case "navpoint":
             depth += 1
+            pendingTitle = nil
+        case "navlabel":
+            inNavLabel = true
         case "text":
+            // Only a navLabel's <text> is a chapter title. The NCX's mandatory
+            // <docTitle><text> (and <docAuthor>) used to be captured too, which
+            // made the book title show up as the first TOC entry.
+            guard inNavLabel, depth > 0 else { break }
             capturingLabel = true
             labelBuffer = ""
         case "content":
@@ -800,9 +832,12 @@ nonisolated private final class NCXDelegate: NSObject, XMLParserDelegate {
         let local = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
         switch local {
         case "text":
+            guard capturingLabel else { break }
             capturingLabel = false
             let t = labelBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
             if pendingTitle == nil, !t.isEmpty { pendingTitle = t }
+        case "navlabel":
+            inNavLabel = false
         case "navpoint":
             depth = max(0, depth - 1)
         default:

@@ -15,6 +15,8 @@ final class DropboxService: ObservableObject {
     private static let authURL   = URL(string: "https://www.dropbox.com/oauth2/authorize")!
     private static let tokenURL  = URL(string: "https://api.dropboxapi.com/oauth2/token")!
     private static let listURL   = URL(string: "https://api.dropboxapi.com/2/files/list_folder")!
+    private static let listContinueURL = URL(string: "https://api.dropboxapi.com/2/files/list_folder/continue")!
+    private static let maxListPages = 50   // safety cap on cursor pagination
     private static let downloadURL = URL(string: "https://content.dropboxapi.com/2/files/download")!
 
     init() { isSignedIn = token != nil }
@@ -52,31 +54,39 @@ final class DropboxService: ObservableObject {
         let accessToken = try await validAccessToken()
         // Dropbox identifies folders by path; root is the empty string.
         let path = folderID ?? ""
-        var req = URLRequest(url: Self.listURL)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "path": path,
-            "limit": 200,
-        ])
-        let (data, _) = try await URLSession.shared.data(for: req)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        let entries = json["entries"] as? [[String: Any]] ?? []
-        return entries.compactMap { entry in
-            guard let tag  = entry[".tag"] as? String,
-                  let name = entry["name"] as? String,
-                  let lower = entry["path_lower"] as? String else { return nil }
-            let isFolder = (tag == "folder")
-            return CloudFile(
-                id: lower,                       // use path as the identifier
-                name: name,
-                isFolder: isFolder,
-                size: entry["size"] as? Int64,
-                downloadURL: nil,
-                mimeType: nil
-            )
+        // list_folder returns at most `limit` entries per call; follow the cursor
+        // (has_more → list_folder/continue) or folders past the first page vanish.
+        var url = Self.listURL
+        var body: [String: Any] = ["path": path, "limit": 200]
+        var results: [CloudFile] = []
+        for _ in 0..<Self.maxListPages {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, _) = try await URLSession.shared.data(for: req)
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            let entries = json["entries"] as? [[String: Any]] ?? []
+            results += entries.compactMap { entry in
+                guard let tag  = entry[".tag"] as? String,
+                      let name = entry["name"] as? String,
+                      let lower = entry["path_lower"] as? String else { return nil }
+                let isFolder = (tag == "folder")
+                return CloudFile(
+                    id: lower,                       // use path as the identifier
+                    name: name,
+                    isFolder: isFolder,
+                    size: entry["size"] as? Int64,
+                    downloadURL: nil,
+                    mimeType: nil
+                )
+            }
+            guard json["has_more"] as? Bool == true, let cursor = json["cursor"] as? String else { break }
+            url = Self.listContinueURL
+            body = ["cursor": cursor]
         }
+        return results
     }
 
     func download(_ file: CloudFile) async throws -> URL {
@@ -104,8 +114,9 @@ final class DropboxService: ObservableObject {
                 if refreshed.refreshToken == nil { refreshed.refreshToken = t.refreshToken } // preserve
                 token = refreshed
                 return refreshed.accessToken
-            } catch {
-                // Session is no longer valid — reflect that in the UI.
+            } catch OAuthError.refreshRejected {
+                // The auth server rejected the refresh token — session is gone.
+                // Any other error (offline, 5xx) is transient: keep the tokens.
                 await MainActor.run { self.signOut() }
                 throw CloudError.notSignedIn
             }

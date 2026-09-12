@@ -86,8 +86,12 @@ actor BookPaginator {
         let resumeFrom = partial?.cursor ?? 0
         let initialPageStarts = partial?.pageStarts ?? [0]
 
-        return try await Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return [] }
+        // Task.detached is unstructured: cancelling the caller's task does NOT
+        // propagate into it, so `checkCancellation()` in the loop never fired and
+        // superseded runs (font-size change, reader dismissed) ran to completion.
+        // Forward cancellation explicitly.
+        let worker = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return [Int]() }
             return try await self.paginate(
                 text: text,
                 key: key,
@@ -95,7 +99,12 @@ actor BookPaginator {
                 initial: initialPageStarts,
                 progress: progress
             )
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
     }
 
     // MARK: - Layout engine

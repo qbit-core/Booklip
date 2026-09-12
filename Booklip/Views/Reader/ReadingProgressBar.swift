@@ -2,6 +2,9 @@ import SwiftUI
 
 struct ReadingProgressBar: View {
     @Binding var progress: Double
+    /// Positions (0...1) to draw as tick marks — bookmarks, so the user can see
+    /// where they are without opening the list.
+    var marks: [Double] = []
     @State private var isDragging = false
     // Visual-only position during drag; committed to the binding only on onEnded.
     @State private var dragProgress: Double? = nil
@@ -18,6 +21,14 @@ struct ReadingProgressBar: View {
                 Capsule()
                     .fill(Color.accentColor)
                     .frame(width: geo.size.width * CGFloat(displayProgress), height: isDragging ? 8 : 4)
+
+                // Bookmark ticks
+                ForEach(Array(marks.enumerated()), id: \.offset) { _, mark in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.orange)
+                        .frame(width: 3, height: 12)
+                        .offset(x: geo.size.width * CGFloat(min(max(mark, 0), 1)) - 1.5)
+                }
 
                 // Thumb
                 Circle()

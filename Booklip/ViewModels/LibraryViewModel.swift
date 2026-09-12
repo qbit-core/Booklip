@@ -182,11 +182,14 @@ class LibraryViewModel: ObservableObject {
         BookStore.save(books)
     }
 
-    func updateProgress(for bookID: UUID, progress: Double, charIndex: Int = 0) {
+    /// `charIndex` nil = "not known" (PDF, or text not loaded yet) → keep the
+    /// stored value. A non-nil 0 is a real position (start of the book) and IS
+    /// stored — treating 0 as "missing" left a stale index that won on reopen.
+    func updateProgress(for bookID: UUID, progress: Double, charIndex: Int? = nil) {
         guard let i = books.firstIndex(where: { $0.id == bookID }) else { return }
         books[i].progress = progress
         books[i].progressUpdated = Date()
-        if charIndex > 0 { books[i].charIndex = charIndex }
+        if let charIndex { books[i].charIndex = charIndex }
         BookStore.save(books)
         ProgressSync.push(books[i])
     }

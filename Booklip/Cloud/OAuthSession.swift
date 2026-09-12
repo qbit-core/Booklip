@@ -144,7 +144,13 @@ enum OAuthSession {
             "client_id":      clientID,
         ].map { "\($0.key)=\($0.value)" }.joined(separator: "&")
         req.httpBody = body.data(using: .utf8)
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        // Only an explicit rejection by the auth server (invalid_grant → 400/401)
+        // means the session is gone. Network errors, 5xx, or an unparsable body
+        // are transient and must NOT sign the user out.
+        if let status = (response as? HTTPURLResponse)?.statusCode, status == 400 || status == 401 {
+            throw OAuthError.refreshRejected
+        }
         return try parseToken(from: data)
     }
 
@@ -160,13 +166,14 @@ enum OAuthSession {
 }
 
 enum OAuthError: LocalizedError {
-    case cancelled, noCode, noRefreshToken, badResponse, notConfigured
+    case cancelled, noCode, noRefreshToken, badResponse, notConfigured, refreshRejected
     var errorDescription: String? {
         switch self {
         case .cancelled:       return "Authentication was cancelled."
         case .noCode:          return "No authorization code returned."
         case .noRefreshToken:  return "No refresh token — please sign in again."
         case .badResponse:     return "Unexpected response from auth server."
+        case .refreshRejected: return "Your session has expired — please sign in again."
         case .notConfigured:   return "Cloud service not configured. Add your client ID and redirect URI in CloudConfig.swift."
         }
     }

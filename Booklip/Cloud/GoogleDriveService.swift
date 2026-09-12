@@ -47,24 +47,34 @@ final class GoogleDriveService: ObservableObject {
     func files(folderID: String = "root") async throws -> [CloudFile] {
         let accessToken = try await validAccessToken()
         let query = "'\(folderID)' in parents and trashed = false".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
-        let fields = "files(id,name,size,mimeType,webContentLink)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
-        var req = URLRequest(url: URL(string: "\(Self.apiBase)/files?q=\(query)&fields=\(fields)&pageSize=100")!)
-        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await URLSession.shared.data(for: req)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        let items = json["files"] as? [[String: Any]] ?? []
-        return items.compactMap { item in
-            guard let id   = item["id"]   as? String,
-                  let name = item["name"] as? String,
-                  let mime = item["mimeType"] as? String else { return nil }
-            return CloudFile(
-                id: id, name: name,
-                isFolder: mime == "application/vnd.google-apps.folder",
-                size: item["size"].flatMap { Int64("\($0)") },
-                downloadURL: item["webContentLink"] as? String,
-                mimeType: mime
-            )
+        let fields = "nextPageToken,files(id,name,size,mimeType,webContentLink)".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+        // Follow nextPageToken; a single page hid everything past 100 entries.
+        var results: [CloudFile] = []
+        var pageToken: String? = nil
+        for _ in 0..<50 {
+            var urlString = "\(Self.apiBase)/files?q=\(query)&fields=\(fields)&pageSize=100"
+            if let pageToken { urlString += "&pageToken=\(pageToken)" }
+            var req = URLRequest(url: URL(string: urlString)!)
+            req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            let (data, _) = try await URLSession.shared.data(for: req)
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            let items = json["files"] as? [[String: Any]] ?? []
+            results += items.compactMap { item in
+                guard let id   = item["id"]   as? String,
+                      let name = item["name"] as? String,
+                      let mime = item["mimeType"] as? String else { return nil }
+                return CloudFile(
+                    id: id, name: name,
+                    isFolder: mime == "application/vnd.google-apps.folder",
+                    size: item["size"].flatMap { Int64("\($0)") },
+                    downloadURL: item["webContentLink"] as? String,
+                    mimeType: mime
+                )
+            }
+            guard let next = json["nextPageToken"] as? String, !next.isEmpty else { break }
+            pageToken = next
         }
+        return results
     }
 
     func download(_ file: CloudFile) async throws -> URL {
@@ -89,7 +99,9 @@ final class GoogleDriveService: ObservableObject {
                 if refreshed.refreshToken == nil { refreshed.refreshToken = t.refreshToken }
                 token = refreshed
                 return refreshed.accessToken
-            } catch {
+            } catch OAuthError.refreshRejected {
+                // Only an explicit rejection ends the session; transient errors
+                // (offline, 5xx) propagate and keep the tokens.
                 await MainActor.run { self.signOut() }
                 throw CloudError.notSignedIn
             }

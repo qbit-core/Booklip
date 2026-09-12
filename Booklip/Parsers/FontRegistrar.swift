@@ -224,15 +224,19 @@ enum FontRegistrar {
             print("[Font] registered \(psName) bytes=\(fontData.count)")
             return psName
         }
+        // Take ownership of the returned CFError exactly once. (A previous version
+        // called takeRetainedValue() inside an `if let` and then takeUnretainedValue()
+        // on the same Unmanaged in the failure log — a use-after-free whenever the
+        // code wasn't alreadyRegistered, e.g. duplicated-name 305.)
+        let error: CFError? = cfError?.takeRetainedValue()
         // Already registered by the system or a previous call → still usable.
-        if let err = cfError?.takeRetainedValue(),
-           CFErrorGetCode(err) == CTFontManagerError.alreadyRegistered.rawValue {
+        if let error, CFErrorGetCode(error) == CTFontManagerError.alreadyRegistered.rawValue {
             print("[Font] \(psName) already registered (system or earlier) — reusing by name")
             registered[psName] = (tmp, digest)
             fontFileURLs.append(tmp)   // keep it; the URL may still be referenced
             return psName
         }
-        print("[Font] registration failed for \(psName): \(cfError.map { "\($0.takeUnretainedValue())" } ?? "?")")
+        print("[Font] registration failed for \(psName): \(error.map { "\($0)" } ?? "?")")
         try? FileManager.default.removeItem(at: tmp)   // registration failed — clean up
         return nil
     }

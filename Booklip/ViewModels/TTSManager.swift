@@ -133,9 +133,16 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Chunking
 
-    /// Splits text at paragraph breaks (2+ newlines). Each paragraph becomes one utterance
-    /// so there are no inter-utterance gaps. willSpeakRangeOfSpeechString fires per-word
-    /// inside each chunk, giving exact synchronization.
+    /// Upper bound on one utterance. AVSpeechSynthesizer crashes/hangs on very
+    /// large utterances (CLAUDE.md), so every chunk is capped regardless of how
+    /// the text is paragraphed.
+    private static let maxChunkLength = 500
+
+    /// Splits text at paragraph breaks (2+ newlines), then subdivides any paragraph
+    /// longer than `maxChunkLength` at sentence boundaries (hard-splitting a single
+    /// overlong sentence). A .txt with single-newline paragraphs, or a chapter with
+    /// no blank lines, previously became ONE whole-document utterance.
+    /// willSpeakRangeOfSpeechString fires per-word inside each chunk.
     private func makeParagraphChunks(in text: String) -> [NSRange] {
         let ns = text as NSString
         let totalLength = ns.length
@@ -151,20 +158,52 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
         breakRanges.append(NSRange(location: totalLength, length: 0))
 
+        let nonBlank = CharacterSet.whitespacesAndNewlines.inverted
         for i in 0..<breakRanges.count - 1 {
             let start = NSMaxRange(breakRanges[i])
             let end   = breakRanges[i + 1].location
             guard end > start else { continue }
             let range = NSRange(location: start, length: end - start)
-            let paraText = ns.substring(with: range)
-            guard !paraText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            result.append(range)
+            // Emptiness test without copying the paragraph out.
+            guard ns.rangeOfCharacter(from: nonBlank, options: [], range: range).location != NSNotFound
+            else { continue }
+            if range.length <= Self.maxChunkLength {
+                result.append(range)
+            } else {
+                result.append(contentsOf: subdivide(range, in: ns))
+            }
         }
 
         if result.isEmpty, !text.isEmpty {
-            result.append(NSRange(location: 0, length: totalLength))
+            result.append(contentsOf: subdivide(NSRange(location: 0, length: totalLength), in: ns))
         }
         return result
+    }
+
+    /// Packs the sentences of `range` into chunks of at most `maxChunkLength`
+    /// UTF-16 units; a sentence longer than the cap is hard-split at the cap.
+    private func subdivide(_ range: NSRange, in ns: NSString) -> [NSRange] {
+        let cap = Self.maxChunkLength
+        let para = ns.substring(with: range)
+        var chunks: [NSRange] = []
+        var current: NSRange?
+        for local in makeSentenceRanges(in: para) {
+            var sentence = NSRange(location: range.location + local.location, length: local.length)
+            // Hard-split an overlong sentence.
+            while sentence.length > cap {
+                if let c = current { chunks.append(c); current = nil }
+                chunks.append(NSRange(location: sentence.location, length: cap))
+                sentence = NSRange(location: sentence.location + cap, length: sentence.length - cap)
+            }
+            if let c = current, NSMaxRange(sentence) - c.location <= cap {
+                current = NSRange(location: c.location, length: NSMaxRange(sentence) - c.location)
+            } else {
+                if let c = current { chunks.append(c) }
+                current = sentence
+            }
+        }
+        if let c = current { chunks.append(c) }
+        return chunks.isEmpty ? [range] : chunks
     }
 
     // MARK: - Sentence segmentation
@@ -204,10 +243,12 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         // Using local coords means AVFoundation's characterRange.location maps
         // directly — no global offset arithmetic needed for the lookup.
         chunkSentenceRanges = makeSentenceRanges(in: raw)
-        // Normalize newlines to spaces 1:1 so AVFoundation characterRange positions
-        // stay aligned with the original local coords.
+        // Normalize newlines (and EPUB image placeholders U+FFFC) to spaces 1:1 so
+        // AVFoundation characterRange positions stay aligned with the original
+        // local coords.
         let text = raw.replacingOccurrences(of: "\r", with: " ")
                       .replacingOccurrences(of: "\n", with: " ")
+                      .replacingOccurrences(of: "\u{FFFC}", with: " ")
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = rate
