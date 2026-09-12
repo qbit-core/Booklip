@@ -50,6 +50,20 @@ struct LibraryView: View {
                 CloudConnectView { url in library.importBook(from: url) }
             }
             .sheet(isPresented: $showingStats) { StatsView() }
+            .overlay(alignment: .bottom) {
+                if library.isImporting {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Importing…").font(.subheadline)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.25), value: library.isImporting)
             .readerCover(item: $library.openBook) { book in
                 ReaderView(book: book)
 #if os(macOS)
@@ -120,6 +134,7 @@ struct LibraryView: View {
 
 struct SelectionBar: View {
     @EnvironmentObject private var library: LibraryViewModel
+    @State private var showingDeleteConfirm = false
 
     var body: some View {
         HStack(spacing: 16) {
@@ -137,7 +152,7 @@ struct SelectionBar: View {
             }
             .disabled(library.selectedBookIDs.isEmpty)
 
-            Button(role: .destructive) { library.deleteSelected() } label: {
+            Button(role: .destructive) { showingDeleteConfirm = true } label: {
                 Label("Delete", systemImage: "trash")
             }
             .disabled(library.selectedBookIDs.isEmpty)
@@ -145,6 +160,13 @@ struct SelectionBar: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
+        .alert("Delete \(library.selectedBookIDs.count) Book\(library.selectedBookIDs.count == 1 ? "" : "s")?",
+               isPresented: $showingDeleteConfirm) {
+            Button("Delete", role: .destructive) { library.deleteSelected() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently delete the selected books and their files. This cannot be undone.")
+        }
     }
 }
 

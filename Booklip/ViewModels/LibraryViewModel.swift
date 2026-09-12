@@ -17,6 +17,7 @@ class LibraryViewModel: ObservableObject {
     // Multi-select state
     @Published var isSelecting = false
     @Published var selectedBookIDs: Set<UUID> = []
+    @Published var isImporting = false
 
     // Book currently open in the reader (presented as a full-screen cover)
     @Published var openBook: Book?
@@ -133,6 +134,7 @@ class LibraryViewModel: ObservableObject {
     // MARK: - Import
 
     func importBook(from url: URL, into folder: BookFolder? = nil) {
+        isImporting = true
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 guard let format = BookFormat.from(url: url) else {
@@ -153,11 +155,13 @@ class LibraryViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.books.append(book)
                     BookStore.save(self.books)
+                    self.isImporting = false
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.importError = error.localizedDescription
                     self.showingImportError = true
+                    self.isImporting = false
                 }
             }
         }
@@ -178,10 +182,11 @@ class LibraryViewModel: ObservableObject {
         BookStore.save(books)
     }
 
-    func updateProgress(for bookID: UUID, progress: Double) {
+    func updateProgress(for bookID: UUID, progress: Double, charIndex: Int = 0) {
         guard let i = books.firstIndex(where: { $0.id == bookID }) else { return }
         books[i].progress = progress
         books[i].progressUpdated = Date()
+        if charIndex > 0 { books[i].charIndex = charIndex }
         BookStore.save(books)
         ProgressSync.push(books[i])
     }
@@ -189,6 +194,9 @@ class LibraryViewModel: ObservableObject {
     // MARK: - Migration
 
     private func migrateUUIDTitles() {
+        // Run only once — opening PDFDocument for every PDF on every launch is slow.
+        let key = "uuidTitleMigrationDone"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
         var changed = false
         for i in books.indices where looksLikeUUID(books[i].title) {
             if books[i].format == .pdf,
@@ -200,6 +208,7 @@ class LibraryViewModel: ObservableObject {
             }
         }
         if changed { BookStore.save(books) }
+        UserDefaults.standard.set(true, forKey: key)
     }
 
     private func looksLikeUUID(_ string: String) -> Bool { UUID(uuidString: string) != nil }

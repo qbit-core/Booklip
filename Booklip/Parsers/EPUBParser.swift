@@ -7,6 +7,28 @@ struct EPUBParser: BookParser, Sendable {
 
     nonisolated init() {}
     nonisolated static func run(url: URL) throws -> ParsedBook { try EPUBParser().parse(url: url) }
+
+    // MARK: - Precompiled regexes
+    // NSRegularExpression is immutable after init and safe to match from
+    // multiple threads concurrently. Compiling these once (instead of inside
+    // stripHTML, called per HTML chunk per chapter) removes most of the
+    // per-call overhead that made a 300+ chapter EPUB take ~38s to parse.
+    private static let reScript = try! NSRegularExpression(
+        pattern: #"<script[^>]*>[\s\S]*?</script>"#, options: .caseInsensitive)
+    private static let reStyle = try! NSRegularExpression(
+        pattern: #"<style[^>]*>[\s\S]*?</style>"#, options: .caseInsensitive)
+    private static let reBlock = try! NSRegularExpression(
+        pattern: #"</?(p|div|br|h[1-6]|li|tr)[^>]*>"#, options: .caseInsensitive)
+    private static let reTags = try! NSRegularExpression(pattern: #"<[^>]+>"#)
+    private static let reBlankLines = try! NSRegularExpression(pattern: #"\n{3,}"#)
+    private static let reNumEntity = try! NSRegularExpression(
+        pattern: #"&#(x[0-9a-fA-F]+|\d+);"#, options: .caseInsensitive)
+    private static let reImgTag = try! NSRegularExpression(
+        pattern: #"<(?:img|image)\b[^>]*?(?:src|xlink:href)\s*=\s*["']([^"']+)["'][^>]*>"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators])
+    private static let reHeading = try! NSRegularExpression(
+        pattern: #"<h[1-3][^>]*>([\s\S]*?)</h[1-3]>"#, options: .caseInsensitive)
+
     nonisolated func parse(url: URL) throws -> ParsedBook {
         // Open-Unzip: archive open + OPF metadata read.
         let unzipID = OSSignpostID(log: booklipSpLog)
@@ -45,38 +67,96 @@ struct EPUBParser: BookParser, Sendable {
         var blocks: [ContentBlock] = []
         var chapterMarks: [(title: String, offset: Int)] = []
         var hrefToOffset: [String: Int] = [:]   // spine href (no fragment) → start offset
+        var imageBlockCount = 0
 
-        // Open-ParseHTML: per-chapter HTML extraction, stripHTML, image data read.
         let parseID = OSSignpostID(log: booklipSpLog)
         os_signpost(.begin, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
                     "spine=%d", spineHrefs.count)
-        var imageBlockCount = 0
 
+        // Phase 1 (serial): ZIPFoundation's Archive is not safe for concurrent
+        // reads, so all HTML must be pulled off the zip on this thread. Cheap
+        // relative to stripHTML — just I/O plus one heading-regex match/chapter.
+        struct RawSegment {
+            enum Kind { case text(String); case imageSrc(String) }
+            let kind: Kind
+            var stripped: String = ""
+        }
+        struct ChapterRaw {
+            let hrefKey: String
+            let chapterDir: String
+            let titleHint: String?
+            var segments: [RawSegment]
+        }
+        var chapterRaws: [ChapterRaw] = []
+        chapterRaws.reserveCapacity(spineHrefs.count)
         for (i, href) in spineHrefs.enumerated() {
             let entryPath = opfBase.isEmpty ? href : "\(opfBase)/\(href)"
             let chapterDir = (entryPath as NSString).deletingLastPathComponent
             guard let html = try? readEntry(entryPath, in: archive) else { continue }
-
-            // Record chapter start (UTF-16 offset in the concatenated text).
-            let startOffset = (fullText as NSString).length
-            hrefToOffset[(href as NSString).lastPathComponent] = startOffset
-            let chapterTitle = firstHeading(in: html)
+            let titleHint = firstHeading(in: html)
                 ?? (href as NSString).lastPathComponent
                     .replacingOccurrences(of: ".xhtml", with: "")
                     .replacingOccurrences(of: ".html", with: "")
-            chapterMarks.append((chapterTitle.isEmpty ? "Chapter \(i + 1)" : chapterTitle, startOffset))
-
-            // Split the chapter HTML around <img> tags, preserving order.
+            var segs: [RawSegment] = []
             for segment in segments(of: html) {
                 switch segment {
-                case .html(let chunk):
-                    let text = stripHTML(chunk)
-                    if !text.isEmpty {
-                        blocks.append(.text(text))
-                        fullText += text + "\n\n"
+                case .html(let chunk):   segs.append(RawSegment(kind: .text(chunk)))
+                case .imageSrc(let src): segs.append(RawSegment(kind: .imageSrc(src)))
+                }
+            }
+            chapterRaws.append(ChapterRaw(
+                hrefKey: (href as NSString).lastPathComponent,
+                chapterDir: chapterDir,
+                titleHint: titleHint.isEmpty ? nil : titleHint,
+                segments: segs))
+            _ = i
+        }
+
+        // Phase 2 (concurrent): stripHTML is a pure function over its String
+        // argument — no shared mutable state — so every chunk across every
+        // chapter can run across all cores at once. This is the part that was
+        // ~38s serial; precompiled regexes + concurrentPerform address both
+        // the compilation overhead and the single-core bottleneck.
+        struct TextWork { let ci: Int; let si: Int; let text: String }
+        var works: [TextWork] = []
+        for (ci, ch) in chapterRaws.enumerated() {
+            for (si, seg) in ch.segments.enumerated() {
+                if case .text(let t) = seg.kind { works.append(TextWork(ci: ci, si: si, text: t)) }
+            }
+        }
+        let stripID = OSSignpostID(log: booklipSpLog)
+        os_signpost(.begin, log: booklipSpLog, name: "Open-StripHTML", signpostID: stripID,
+                    "chunks=%d", works.count)
+        var strippedResults = [String](repeating: "", count: works.count)
+        if !works.isEmpty {
+            strippedResults.withUnsafeMutableBufferPointer { buf in
+                DispatchQueue.concurrentPerform(iterations: works.count) { i in
+                    buf[i] = stripHTML(works[i].text)
+                }
+            }
+        }
+        os_signpost(.end, log: booklipSpLog, name: "Open-StripHTML", signpostID: stripID)
+        for (i, work) in works.enumerated() {
+            chapterRaws[work.ci].segments[work.si].stripped = strippedResults[i]
+        }
+
+        // Phase 3 (serial): image reads need the archive again; text assembly
+        // must preserve spine + in-chapter segment order for offsets to be correct.
+        for (i, ch) in chapterRaws.enumerated() {
+            let startOffset = (fullText as NSString).length
+            hrefToOffset[ch.hrefKey] = startOffset
+            let chapterTitle = ch.titleHint ?? "Chapter \(i + 1)"
+            chapterMarks.append((chapterTitle, startOffset))
+
+            for seg in ch.segments {
+                switch seg.kind {
+                case .text:
+                    if !seg.stripped.isEmpty {
+                        blocks.append(.text(seg.stripped))
+                        fullText += seg.stripped + "\n\n"
                     }
                 case .imageSrc(let src):
-                    let imgPath = resolvePath(src, relativeTo: chapterDir)
+                    let imgPath = resolvePath(src, relativeTo: ch.chapterDir)
                     if let data = try? readData(imgPath, in: archive), !data.isEmpty {
                         blocks.append(.image(data))
                         imageBlockCount += 1
@@ -169,9 +249,10 @@ struct EPUBParser: BookParser, Sendable {
 
     // First heading (h1–h3) text in a chapter's HTML, used as its TOC title.
     nonisolated private func firstHeading(in html: String) -> String? {
-        let pattern = #"<h[1-3][^>]*>([\s\S]*?)</h[1-3]>"#
-        guard let range = html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
-        let heading = stripHTML(String(html[range]))
+        let ns = html as NSString
+        guard let m = Self.reHeading.firstMatch(in: html, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges >= 2 else { return nil }
+        let heading = stripHTML(ns.substring(with: m.range(at: 1)))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return heading.isEmpty ? nil : String(heading.prefix(80))
     }
@@ -280,14 +361,10 @@ struct EPUBParser: BookParser, Sendable {
 
     nonisolated private func segments(of html: String) -> [HTMLSegment] {
         // Matches <img ... src="..."> and <image ... xlink:href="..."> (SVG cover pages)
-        let pattern = #"<(?:img|image)\b[^>]*?(?:src|xlink:href)\s*=\s*["']([^"']+)["'][^>]*>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
-            return [.html(html)]
-        }
         let ns = html as NSString
         var result: [HTMLSegment] = []
         var cursor = 0
-        regex.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+        Self.reImgTag.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
             guard let match else { return }
             if match.range.location > cursor {
                 result.append(.html(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))))
@@ -405,24 +482,64 @@ struct EPUBParser: BookParser, Sendable {
         }
     }
 
+    // Pure function of its argument — no shared state — safe to call from any
+    // thread, including concurrently via DispatchQueue.concurrentPerform.
+    // Uses NSMutableString + NSRegularExpression.replaceMatches(in:) instead of
+    // String.replacingOccurrences(of:options:.regularExpression) — the latter
+    // compiles a fresh NSRegularExpression internally on every call, which
+    // dominated cost when invoked per HTML chunk across every chapter.
     nonisolated private func stripHTML(_ html: String) -> String {
-        var text = html
+        let ms = NSMutableString(string: html)
+        func full() -> NSRange { NSRange(location: 0, length: ms.length) }
         // Remove script/style blocks
-        for tag in ["script", "style"] {
-            let pattern = "<\(tag)[^>]*>[\\s\\S]*?</\(tag)>"
-            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
-        }
+        Self.reScript.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
+        Self.reStyle.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
         // Block elements → newlines
-        let blockPattern = #"</?(p|div|br|h[1-6]|li|tr)[^>]*>"#
-        text = text.replacingOccurrences(of: blockPattern, with: "\n", options: .regularExpression)
+        Self.reBlock.replaceMatches(in: ms, options: [], range: full(), withTemplate: "\n")
         // Strip remaining tags
-        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        // Decode common HTML entities
-        let entities: [(String, String)] = [("&amp;","&"),("&lt;","<"),("&gt;",">"),("&quot;","\""),("&apos;","'"),("&#160;"," "),("&nbsp;"," ")]
-        for (entity, char) in entities { text = text.replacingOccurrences(of: entity, with: char) }
+        Self.reTags.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
+        // Decode HTML entities (named + numeric/hex)
+        decodeEntities(ms)
         // Collapse excess blank lines
-        text = text.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.reBlankLines.replaceMatches(in: ms, options: [], range: full(), withTemplate: "\n\n")
+        return (ms as String).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // Named entities are substring replacements (&amp; MUST run first — a
+    // source containing the literal text "&amp;lt;" means the author wants to
+    // display "&lt;" as text, not "<"; decoding &lt; before &amp; would wrongly
+    // collapse it to "<" instead of the intended literal "&lt;"). Numeric and
+    // hex entities (&#13; &#x0D; etc.) are decoded in one regex pass — matches
+    // are computed once against a snapshot of the string, then applied in
+    // reverse so earlier ranges stay valid as later ones are replaced in place.
+    // A decoded &#13; / &#x0D; (CR) is dropped rather than inserted, since EPUB
+    // line breaks are represented by the block-element → "\n" pass above.
+    nonisolated private func decodeEntities(_ ms: NSMutableString) {
+        let named: [(String, String)] = [
+            ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+            ("&quot;", "\""), ("&apos;", "'"),
+            ("&#160;", "\u{00A0}"), ("&nbsp;", "\u{00A0}")
+        ]
+        for (entity, rep) in named {
+            ms.replaceOccurrences(of: entity, with: rep, options: .literal,
+                                  range: NSRange(location: 0, length: ms.length))
+        }
+        let matches = Self.reNumEntity.matches(in: ms as String, range: NSRange(location: 0, length: ms.length))
+        for m in matches.reversed() {
+            guard m.numberOfRanges >= 2 else { continue }
+            let inner = (ms as NSString).substring(with: m.range(at: 1))   // e.g. "13" or "x0D"
+            let codePoint: UInt32?
+            if inner.first == "x" || inner.first == "X" {
+                codePoint = UInt32(inner.dropFirst(), radix: 16)
+            } else {
+                codePoint = UInt32(inner)
+            }
+            var replacement = ""
+            if let cp = codePoint, cp != 0x0D, cp != 0x00, let scalar = Unicode.Scalar(cp) {
+                replacement = String(scalar)
+            }
+            ms.replaceCharacters(in: m.range, with: replacement)
+        }
     }
 }
 

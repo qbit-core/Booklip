@@ -47,7 +47,7 @@ struct CloudConnectView: View {
                 }
 
                 // OneDrive
-/*                Section {
+                Section {
                     CloudServiceRow(
                         iconColor: .blue,
                         name: "OneDrive",
@@ -65,7 +65,7 @@ struct CloudConnectView: View {
                         Text(e).font(.caption).foregroundStyle(.red)
                     }
                 }
-*/
+
                 // Google Drive
                 Section {
                     CloudServiceRow(

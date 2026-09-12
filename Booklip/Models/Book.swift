@@ -87,8 +87,12 @@ struct Book: Identifiable, Codable {
     // field that is absent in old stored data causes the entire decode to throw and
     // BookStore.load() silently returns [].  Using decodeIfPresent + a default for
     // every non-essential field prevents that silent wipe on update.
+    // Exact UTF-16 character index of the last reading position.
+    // More precise than progress (Double) — no float round-trip error.
+    var charIndex: Int = 0
+
     enum CodingKeys: String, CodingKey {
-        case id, title, author, format, fileName, progress
+        case id, title, author, format, fileName, progress, charIndex
         case dateAdded, wordCount, folderID, coverFileName, progressUpdated
     }
 
@@ -107,6 +111,7 @@ struct Book: Identifiable, Codable {
         format        = try c.decode(BookFormat.self,      forKey: .format)
         fileName      = try c.decode(String.self,          forKey: .fileName)
         progress      = try c.decodeIfPresent(Double.self, forKey: .progress)      ?? 0.0
+        charIndex     = try c.decodeIfPresent(Int.self,    forKey: .charIndex)     ?? 0
         dateAdded     = try c.decodeIfPresent(Date.self,   forKey: .dateAdded)     ?? Date()
         wordCount     = try c.decodeIfPresent(Int.self,    forKey: .wordCount)     ?? 0
         folderID      = try c.decodeIfPresent(UUID.self,   forKey: .folderID)

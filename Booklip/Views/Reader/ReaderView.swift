@@ -1,4 +1,5 @@
 import SwiftUI
+import PDFKit
 
 struct ReaderView: View {
     let book: Book
@@ -22,6 +23,7 @@ struct ReaderView: View {
     @Environment(\.scenePhase) private var scenePhase
     // Reading session timer — records elapsed seconds for ReadingStats
     @State private var sessionStart: Date? = nil
+    @State private var autoScrolling = false
 
     init(book: Book) {
         self.book = book
@@ -55,7 +57,8 @@ struct ReaderView: View {
                     pageNavigationDirection: $pageNavigationDirection,
                     searchQuery: committedSearchQuery,
                     searchResultIndex: searchResultIndex,
-                    selectedRange: $selectedTextRange
+                    selectedRange: $selectedTextRange,
+                    autoScrolling: $autoScrolling
                 )
             }
 
@@ -131,8 +134,12 @@ struct ReaderView: View {
                 Text(book.author).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            // Invisible placeholder keeps the title centered
-            Color.clear.frame(width: 32, height: 1)
+            // Bookmark button — top-right corner
+            Button { vm.addBookmark() } label: {
+                Image(systemName: vm.isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
+                    .font(.headline)
+                    .foregroundStyle(vm.isCurrentPositionBookmarked ? Color.accentColor : Color.primary)
+            }
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
@@ -144,11 +151,22 @@ struct ReaderView: View {
     private var bottomBar: some View {
         VStack(spacing: 0) {
             ReadingProgressBar(progress: $vm.progress)
-            Text("\(Int(vm.progress * 100))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 4)
+            VStack(spacing: 1) {
+                if let pagProg = vm.paginationProgress {
+                    Text("페이지 계산 중 \(Int(pagProg * 100))%")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(pageLabel)
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.primary)
+                }
+                Text("\(Int(vm.progress * 100))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 4)
             HStack(spacing: 28) {
                 // TTS button
                 Button { showTTS = true } label: {
@@ -170,11 +188,13 @@ struct ReaderView: View {
                         .foregroundStyle(showSearch ? Color.accentColor : Color.primary)
                 }
 
-                // Bookmark current position
-                Button { vm.addBookmark() } label: {
-                    Image(systemName: vm.isCurrentPositionBookmarked ? "bookmark.fill" : "bookmark")
-                        .font(.title2)
-                        .foregroundStyle(vm.isCurrentPositionBookmarked ? Color.accentColor : Color.primary)
+                // Auto-scroll toggle (text books only)
+                if book.format != .pdf {
+                    Button { autoScrolling.toggle() } label: {
+                        Image(systemName: "scroll")
+                            .font(.title2)
+                            .foregroundStyle(autoScrolling ? Color.accentColor : Color.primary)
+                    }
                 }
 
                 // feature 9: highlight selected text (text books only)
@@ -257,9 +277,50 @@ struct ReaderView: View {
         selectedTextRange = nil
     }
 
+    // Page X / Y label shown below the progress bar.
+    private var pageLabel: String {
+        if book.format == .pdf, let pageCount = vm.pdfDocument?.pageCount, pageCount > 0 {
+            let current = Int(vm.progress * Double(pageCount - 1)) + 1
+            return "Page \(current) / \(pageCount)"
+        }
+        let charCount = vm.plainText.utf16.count
+        guard charCount > 0 else { return "" }
+
+        // Counter-based page number (most accurate — updated by page turns and seeks).
+        if vm.currentPage > 0, vm.estimatedTotalPages > 0 {
+            return "Page \(vm.currentPage) / \(vm.estimatedTotalPages)"
+        }
+
+        // BookPaginator index (exact, available after background computation).
+        let starts = vm.pageStarts
+        if starts.count > 1 {
+            let charIndex = Int(vm.progress * Double(charCount))
+            let current = starts.pageIndex(forChar: charIndex) + 1
+            return "Page \(min(current, starts.count)) / \(starts.count)"
+        }
+
+        // Seed formula while neither counter nor paginator is ready.
+        // Uses floor(textAreaH / lineHeight) so pageStep <= textAreaH.
+        let fontSize   = max(8.0, settings.fontSize)
+        let lineHeight = fontSize + max(0.0, settings.lineSpacing)
+        let textW = vm.textAreaSize.width  > 0 ? vm.textAreaSize.width  : 350.0
+        let textH = vm.textAreaSize.height > 0 ? vm.textAreaSize.height : 700.0
+        let charsPerLine  = max(1.0, floor(textW / fontSize))
+        let linesPerPage  = max(1.0, floor(textH / lineHeight))
+        let charsPerPage  = max(1, Int(charsPerLine * linesPerPage))
+        let total   = max(1, charCount / charsPerPage)
+        let current = Int(vm.progress * Double(total)) + 1
+        return "Page \(min(current, total)) / \(total)"
+    }
+
     // feature 7: persist progress and record reading time
     private func saveProgress() {
-        library.updateProgress(for: book.id, progress: vm.progress)
+        // Save exact UTF-16 character index so restore can set progress without
+        // floating-point round-trip error. PDF books don't use charIndex.
+        let charIndex: Int = book.format != .pdf
+            ? Int(vm.progress * Double(vm.plainText.utf16.count))
+            : 0
+        library.updateProgress(for: book.id, progress: vm.progress, charIndex: charIndex)
         if let start = sessionStart {
             ReadingStats.record(seconds: Date().timeIntervalSince(start))
             sessionStart = nil

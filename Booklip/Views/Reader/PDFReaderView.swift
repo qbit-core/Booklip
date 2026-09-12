@@ -285,7 +285,7 @@ private struct ContinuousPDFView: UIViewRepresentable {
                 let targetY = min(max(0, first.frame.minY - 60), maxOffset)
                 isScrollingProgrammatically = true
                 scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
-                isScrollingProgrammatically = false
+                // isScrollingProgrammatically is reset in scrollViewDidEndScrollingAnimation
             }
         }
 
@@ -298,6 +298,8 @@ private struct ContinuousPDFView: UIViewRepresentable {
             guard maxOffset > 0 else { return }
             let targetY = min(max(0, target * scrollView.contentSize.height), maxOffset)
             guard abs(scrollView.contentOffset.y - targetY) > 2 else { return }
+            // setContentOffset(animated: false) is synchronous — no animation callback fires,
+            // so reset the flag immediately after the call.
             isScrollingProgrammatically = true
             scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
             isScrollingProgrammatically = false
@@ -344,7 +346,10 @@ private struct ContinuousPDFView: UIViewRepresentable {
             if !willDecelerate { finishScroll(scrollView) }
         }
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { finishScroll(scrollView) }
-        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { finishScroll(scrollView) }
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+            isScrollingProgrammatically = false
+            finishScroll(scrollView)
+        }
 
         private func finishScroll(_ scrollView: UIScrollView) {
             commitProgress(scrollView)

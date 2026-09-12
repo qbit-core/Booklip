@@ -18,7 +18,7 @@ This is a one-time setup. Takes ~15 minutes total.
    (or "Accounts in any org directory and personal" if you also want work accounts)
 5. **Redirect URI:**
    - Platform dropdown → **Mobile and desktop applications**
-   - Value: `readerapp://auth/onedrive`
+   - Value: `booklip://auth/onedrive`
 6. Click **Register**
 
 ### Copy the Client ID
@@ -74,7 +74,7 @@ This is a one-time setup. Takes ~15 minutes total.
 1. Go to **https://www.dropbox.com/developers/apps** → **Create app**
 2. **Scoped access** → **Full Dropbox** (or App folder if you prefer)
 3. **Permissions** tab → enable `files.metadata.read` and `files.content.read` → Submit
-4. **Settings** tab → **OAuth 2 → Redirect URIs** → add `readerapp://auth/dropbox`
+4. **Settings** tab → **OAuth 2 → Redirect URIs** → add `booklip://auth/dropbox`
 5. Copy the **App key** → paste into `CloudConfig.dropboxClientID`
    (Installed apps use PKCE; no app secret needed.)
 
@@ -85,7 +85,7 @@ This is a one-time setup. Takes ~15 minutes total.
 ```swift
 enum CloudConfig {
     static let oneDriveClientID    = "11111111-2222-3333-4444-555555555555"
-    static let oneDriveRedirectURI = "readerapp://auth/onedrive"
+    static let oneDriveRedirectURI = "booklip://auth/onedrive"
 
     static let googleClientID      = "123456-abcdef.apps.googleusercontent.com"
     static let googleRedirectURI   = "com.googleusercontent.apps.123456-abcdef:/oauth2redirect"
@@ -101,9 +101,9 @@ back into the app.
 
 1. Xcode → select the **Booklip** target → **Info** tab
 2. Expand **URL Types** (add the section if missing) → **+** twice
-3. Entry 1 (OneDrive + Dropbox both use the `readerapp` scheme):
-   - Identifier: `readerapp-auth`
-   - URL Schemes: `readerapp`
+3. Entry 1 (OneDrive + Dropbox both use the `booklip` scheme):
+   - Identifier: `booklip-auth`
+   - URL Schemes: `booklip`
 4. Entry 2 (Google):
    - Identifier: `google-auth`
    - URL Schemes: `com.googleusercontent.apps.123456-abcdef`

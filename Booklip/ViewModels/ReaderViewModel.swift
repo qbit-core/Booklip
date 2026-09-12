@@ -36,8 +36,102 @@ class ReaderViewModel: ObservableObject {
     @Published var isLoading = true
     @Published var errorMessage: String?
 
+    /// Exact page-start character offsets, computed by BookPaginator. Empty until ready.
+    @Published var pageStarts: [Int] = []
+    /// 0…1 while paginating, nil when idle (not yet started or complete).
+    @Published var paginationProgress: Double? = nil
+    /// Actual rendered text area (textContainer minus padding), set by the coordinator.
+    @Published var textAreaSize: CGSize = .zero
+    /// Counter-based current page (1-based). Updated by page turns and seeks.
+    @Published var currentPage: Int = 0
+    /// Total pages estimate. Locked in after 10 calibration samples.
+    @Published var estimatedTotalPages: Int = 0
+
+    func advancePage() {
+        guard estimatedTotalPages > 0 else { return }
+        currentPage = min(currentPage + 1, estimatedTotalPages)
+    }
+
+    func retreatPage() {
+        currentPage = max(currentPage - 1, 1)
+    }
+
+    /// Called after a seek or on initial open to rebase the counter.
+    func rebasePage(atCharIdx charIdx: Int, totalChars: Int) {
+        guard estimatedTotalPages > 0, totalChars > 0 else { return }
+        let cpp = max(1, totalChars / estimatedTotalPages)
+        currentPage = max(1, min(charIdx / cpp + 1, estimatedTotalPages))
+    }
+
+    /// Seeds total-pages estimate from a charsPerPage value (formula or profile).
+    func seedTotalPages(charsPerPage: Int) {
+        let charCount = (plainText as NSString).length
+        guard charCount > 0, charsPerPage > 0 else { return }
+        let total = max(1, charCount / charsPerPage)
+        if estimatedTotalPages == 0 || abs(total - estimatedTotalPages) > estimatedTotalPages / 10 {
+            estimatedTotalPages = total
+        }
+        // Initialise currentPage from charIndex if not yet set.
+        if currentPage == 0, book.charIndex > 0 {
+            currentPage = max(1, min(book.charIndex / charsPerPage + 1, total))
+        } else if currentPage == 0 {
+            currentPage = 1
+        }
+    }
+
+    /// Called when 10 calibration samples produce a stable median charsPerPage.
+    func lockCharsPerPage(_ cpp: Int, profileKey: String) {
+        PaginationProfile.save(charsPerPage: cpp, key: profileKey)
+        let charCount = (plainText as NSString).length
+        guard charCount > 0, cpp > 0 else { return }
+        let total = max(1, charCount / cpp)
+        // BUG (fixed): progress must be computed under the OLD estimatedTotalPages
+        // (i.e. the OLD charsPerPage/seed) before it's overwritten below — computing
+        // it after reassignment made numerator and denominator both derive from the
+        // NEW cpp, collapsing `progress * total` back to exactly `currentPage`, i.e.
+        // a complete no-op: currentPage never actually rebased to the new cpp.
+        let oldTotal = estimatedTotalPages
+        let progress = oldTotal > 0 ? Double(currentPage) / Double(oldTotal) : 0
+        estimatedTotalPages = total
+        currentPage = max(1, min(Int(progress * Double(total)) + 1, total))
+        print(String(format: "[PAGE-CAL] locked charsPerPage=%d totalPages=%d currentPage=%d",
+                     cpp, total, currentPage))
+    }
+
     let book: Book
     private var loadTask: Task<Void, Never>?
+    private var paginationTask: Task<Void, Never>?
+
+    /// Called by the coordinator once the UITextView's bounds are stable.
+    func startPagination(containerWidth: CGFloat, containerHeight: CGFloat, settings: ReadingSettings) {
+        guard book.format != .pdf else { return }
+        let text = plainText
+        guard !text.isEmpty else { return }
+        let fontName = settings.useEmbeddedFont ? (embeddedFontName ?? settings.fontName) : settings.fontName
+        let key = BookPaginator.CacheKey(
+            bookID: book.id,
+            fontName: fontName,
+            fontSize: settings.fontSize,
+            lineSpacing: settings.lineSpacing,
+            containerWidth: Double(containerWidth),
+            containerHeight: Double(containerHeight)
+        )
+        paginationTask?.cancel()
+        paginationTask = Task {
+            await MainActor.run { paginationProgress = 0 }
+            do {
+                let result = try await BookPaginator.shared.compute(text: text, key: key) { fraction in
+                    Task { @MainActor in self.paginationProgress = fraction }
+                }
+                await MainActor.run {
+                    self.pageStarts = result
+                    self.paginationProgress = nil
+                }
+            } catch {
+                await MainActor.run { self.paginationProgress = nil }
+            }
+        }
+    }
 
     init(book: Book) {
         self.book = book
@@ -154,6 +248,14 @@ class ReaderViewModel: ObservableObject {
                 blocks = parsedBlocks
                 embeddedFontName = FontRegistrar.registerFirst(fonts)
                 chapters = parsedChapters
+                // Restore progress from exact charIndex (integer) to avoid
+                // float round-trip error from book.progress (Double).
+                if book.charIndex > 0 {
+                    let charCount = (text as NSString).length
+                    if charCount > 0 {
+                        progress = Double(book.charIndex) / Double(charCount)
+                    }
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
