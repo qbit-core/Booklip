@@ -1120,6 +1120,9 @@ struct NativeTextView: UIViewRepresentable {
         // profile / re-rebases currentPage) every further 10 page turns.
         private var hasLockedCharsPerPage = false
         private var postSeekExclude = false   // drop next sample after a seek
+        // landingLoop's exact-position probe (ensureLayout(forCharacterRange:) +
+        // lineFragmentRect) is disabled for the session if it ever proves slow.
+        private var charProbeDisabled = false
         private var currentProfileKey = ""
 
         // ── Stable progress denominator ────────────────────────────────────────
@@ -1554,15 +1557,46 @@ struct NativeTextView: UIViewRepresentable {
                 }
                 // [3] asymmetric dy clamp — backward (negative dy) is the historically
                 // expensive/hang-prone direction (seeking into not-yet-laid-out text).
-                let dy = dyRaw >= 0 ? min(50_000, dyRaw) : max(-20_000, dyRaw)
+                let secantDy = dyRaw >= 0 ? min(50_000, dyRaw) : max(-20_000, dyRaw)
+
+                // [4] Exact correction: ask TextKit where the target character's line
+                // actually is, instead of extrapolating in pixel space. The secant
+                // step oscillated without converging (observed: 8 attempts ending
+                // 3,806 chars off on a cold restore) because local density differs
+                // ~10x between already-laid-out text (~0.42 chars/pt) and TextKit's
+                // estimate for not-yet-laid-out text (~4.5 chars/pt); any two
+                // samples straddling that boundary give a garbage slope. The probe
+                // is O(local) with non-contiguous layout; it's timed and disabled for
+                // the session if it ever proves slow, falling back to the secant.
+                var dy = secantDy
+                var probeMs = 0.0
+                if !charProbeDisabled, abs(charDiff) > 300, tv.textStorage.length > 0 {
+                    let _tProbe = CFAbsoluteTimeGetCurrent()
+                    let safeIdx = min(max(0, targetCharIdx), tv.textStorage.length - 1)
+                    let charRange = NSRange(location: safeIdx, length: 1)
+                    lm.ensureLayout(forCharacterRange: charRange)
+                    let gRange = lm.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+                    var probeY: CGFloat?
+                    if gRange.location != NSNotFound, gRange.location < lm.numberOfGlyphs {
+                        let line = lm.lineFragmentRect(forGlyphAt: gRange.location, effectiveRange: nil,
+                                                       withoutAdditionalLayout: true)
+                        if line.minY.isFinite, line.height > 0 { probeY = line.minY + inset }
+                    }
+                    probeMs = (CFAbsoluteTimeGetCurrent() - _tProbe) * 1000
+                    if probeMs > 400 {
+                        charProbeDisabled = true
+                        print("[\(tag)] exact probe took \(Int(probeMs))ms — disabling for this session")
+                    }
+                    if let probeY { dy = probeY - y }
+                }
 
                 let now = CFAbsoluteTimeGetCurrent()
                 let elapsedMs = (now - t0) * 1000
                 // Budget clock starts when attempt 0 finishes (see doc comment).
                 if attempt == 0 { budgetStart = now }
                 let budgetMs = (now - budgetStart) * 1000
-                print(String(format: "[\(tag)] attempt=%d landed=%.4f diff=%d density=%.4f dy=%.1f ensureMs=%.0f stepMs=%.0f elapsed=%.0fms budget=%.0fms",
-                             attempt, landedProgress, charDiff, density, Double(dy), ensureMs, stepMs, elapsedMs, budgetMs))
+                print(String(format: "[\(tag)] attempt=%d landed=%.4f diff=%d density=%.4f dy=%.1f secantDy=%.1f probe=%.0fms ensureMs=%.0f stepMs=%.0f elapsed=%.0fms budget=%.0fms",
+                             attempt, landedProgress, charDiff, density, Double(dy), Double(secantDy), probeMs, ensureMs, stepMs, elapsedMs, budgetMs))
 
                 // [3] 350ms wall-clock budget for correction attempts (attempt 1+):
                 // stop immediately, snap to best below.
