@@ -68,10 +68,12 @@ struct ReaderView: View {
             // Left/right tap zones for page navigation — SwiftUI overlay avoids
             // UIKit gesture-recognizer conflicts (especially in paper mode where
             // the scroll view's pan recognizer is disabled).
-            // Not in highlight mode: these SwiftUI overlays sit above the UIKit
-            // text view and would swallow the long-press/drag needed to select.
-            if !showBars && !highlightMode && !vm.isLoading
-                && (book.format != .pdf || settings.pageEffect == .paper) {
+            // Paper mode only. These SwiftUI overlays sit above the UIKit view and
+            // swallow every touch, so in vertical-slide mode they blocked finger
+            // scrolling entirely; there the text view's own tap recognizer handles
+            // edge-tap paging and bar toggling (see TextReaderView.onTap). Also off
+            // in highlight mode so selection touches reach the text view.
+            if !showBars && !highlightMode && !vm.isLoading && settings.pageEffect == .paper {
                 HStack(spacing: 0) {
                     Color.clear
                         .contentShape(Rectangle())
@@ -86,6 +88,10 @@ struct ReaderView: View {
                         .onTapGesture { pageNavigationDirection = 1 }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                // Paper mode: right→left swipe = next page, left→right = previous.
+                // The overlay swallows touches, so the swipe must be recognized here
+                // (the text view's own swipe recognizers never see it).
+                .gesture(pageSwipe)
                 .allowsHitTesting(true)
             }
 
@@ -99,14 +105,16 @@ struct ReaderView: View {
                     }
                 }
                 // Tapping the content area while bars are visible hides them.
-                // Disabled in highlight mode so touches reach the text view for
-                // selection (the text view's own tap recognizer still toggles bars).
+                // Paper mode only: in vertical-slide mode this full-screen catcher
+                // blocked scrolling while the bars were up; the UIKit tap recognizer
+                // hides the bars instead. Also off in highlight mode.
                 .background(
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { showBars = false }
+                        .gesture(pageSwipe)   // paper mode: swipe pages even with bars up
                         .ignoresSafeArea()
-                        .allowsHitTesting(!highlightMode)
+                        .allowsHitTesting(!highlightMode && settings.pageEffect == .paper)
                 )
             }
 
@@ -159,6 +167,18 @@ struct ReaderView: View {
         .onKeyPress(.leftArrow)  { pageNavigationDirection = -1; return .handled }
         .onKeyPress(.pageDown)   { pageNavigationDirection = 1;  return .handled }
         .onKeyPress(.pageUp)     { pageNavigationDirection = -1; return .handled }
+    }
+
+    // Horizontal swipe → page turn (paper mode). Right→left = next, left→right =
+    // previous; a mostly-vertical drag is ignored so it can't misfire as a page.
+    private var pageSwipe: some Gesture {
+        DragGesture(minimumDistance: 30)
+            .onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > abs(dy) * 1.5 else { return }
+                pageNavigationDirection = dx < 0 ? 1 : -1
+            }
     }
 
     // MARK: - Top bar

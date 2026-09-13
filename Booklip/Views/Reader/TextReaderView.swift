@@ -147,7 +147,19 @@ struct TextReaderView: View {
             pageNavigationDirection: $pageNavigationDirection,
             searchQuery: searchQuery,
             searchResultIndex: searchResultIndex,
-            onTap: { showBars.toggle() }
+            onTap: { xFraction in
+                // Bars up → any tap hides them.
+                if showBars { showBars = false; return }
+                // Vertical-slide mode has no SwiftUI tap zones (they would block
+                // scrolling), so edge taps page here and the middle shows the bars.
+                if settings.pageEffect == .verticalSlide, !highlightMode {
+                    if xFraction < 0.3 { pageNavigationDirection = -1 }
+                    else if xFraction > 0.7 { pageNavigationDirection = 1 }
+                    else { showBars = true }
+                } else {
+                    showBars = true
+                }
+            }
         )
     }
 #endif
@@ -662,7 +674,8 @@ struct NativeTextView: UIViewRepresentable {
     var pageNavigationDirection: Binding<Int>? = nil
     var searchQuery: String = ""
     var searchResultIndex: Int = 0
-    let onTap: () -> Void
+    /// Called with the tap's horizontal position as a 0...1 fraction of the view width.
+    let onTap: (CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(progress: $progress, autoScrolling: $autoScrolling, onTap: onTap)
@@ -1179,7 +1192,7 @@ struct NativeTextView: UIViewRepresentable {
     class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
         @Binding var progress: Double
         @Binding var autoScrolling: Bool
-        let onTap: () -> Void
+        let onTap: (CGFloat) -> Void
         weak var textView: UITextView?
         var isScrollingProgrammatically = false
         var lastLayoutKey = ""
@@ -1261,7 +1274,7 @@ struct NativeTextView: UIViewRepresentable {
         // of a book skips all retries and restores position immediately.
         // Key is set by updateUIView using contentKey + layoutKey + screen width.
 
-        init(progress: Binding<Double>, autoScrolling: Binding<Bool>, onTap: @escaping () -> Void) {
+        init(progress: Binding<Double>, autoScrolling: Binding<Bool>, onTap: @escaping (CGFloat) -> Void) {
             _progress = progress
             _autoScrolling = autoScrolling
             self.onTap = onTap
@@ -1983,7 +1996,9 @@ struct NativeTextView: UIViewRepresentable {
         // Page navigation is handled by SwiftUI tap zones in ReaderView.
         // This handler only toggles the bars (or lets highlight mode work).
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            onTap()
+            guard let tv = textView, tv.bounds.width > 0 else { onTap(0.5); return }
+            let x = gesture.location(in: tv).x
+            onTap(min(max(x / tv.bounds.width, 0), 1))
         }
 
         // Swipe left = next page, swipe right = previous page (standard book convention).
