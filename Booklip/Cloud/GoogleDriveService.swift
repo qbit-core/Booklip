@@ -77,16 +77,13 @@ final class GoogleDriveService: ObservableObject {
         return results
     }
 
-    func download(_ file: CloudFile) async throws -> URL {
+    func download(_ file: CloudFile, folderName: String? = nil) async throws -> URL {
         let accessToken = try await validAccessToken()
         // Google Docs native formats can't be downloaded directly — only binary files
         var req = URLRequest(url: URL(string: "\(Self.apiBase)/files/\(file.id)?alt=media")!)
         req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw CloudError.downloadFailed
-        }
-        return try writeTempFile(data, name: file.name)
+        // Background session: the transfer survives app suspension.
+        return try await BackgroundDownloader.shared.download(req, name: file.name, folderName: folderName)
     }
 
     // MARK: - Helpers
@@ -107,12 +104,6 @@ final class GoogleDriveService: ObservableObject {
             }
         }
         return t.accessToken
-    }
-
-    private func writeTempFile(_ data: Data, name: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        try data.write(to: url)
-        return url
     }
 
     private func save(_ t: OAuthSession.Token?) {

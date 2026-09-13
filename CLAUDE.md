@@ -63,7 +63,13 @@ bottom bar → select → "Highlight" edit menu; macOS: select → context menu)
 reading-position restore. **TTS** (en-US + ko-KR voices, speed/pitch, word
 highlight + follow, sleep timer). **Reading stats** (time + streak).
 **Cloud import** via OAuth (Dropbox, Google Drive, OneDrive — all live;
-listings follow pagination cursors).
+listings follow pagination cursors). The browser's Select mode picks files
+AND folders (a cloud folder becomes a library folder of the same name,
+subfolders flattened into it), supports Photos-style sweep selection and
+All/None. Downloads go through `BackgroundDownloader` (background
+`URLSession`) so they keep running while the app is suspended; a transfer
+that finishes after a relaunch is imported via `orphanHandler`.
+Library multi-select also has sweep selection + All/None (`DragSelection.swift`).
 
 ## Key decisions & gotchas (don't relearn these)
 - **Reader opens as a full-screen cover** (`readerCover`, iOS `fullScreenCover` /
@@ -123,6 +129,10 @@ listings follow pagination cursors).
   Google still `readerapp://…`. Changing a scheme requires updating the
   provider's console too. Client IDs live in `CloudConfig` (`CLOUD_SETUP.md`).
 - macOS needs the outgoing-network entitlement for token exchange.
+- Dropbox `Dropbox-API-Arg` must be header-safe JSON: non-ASCII (Korean
+  paths) is `\u`-escaped (`DropboxService.headerSafeJSON`).
+- Sweep selection needs a `ScrollView`; a `List` (UITableView) swallows the
+  horizontal pan, so the cloud browser is a `ScrollView` + `LazyVStack`.
 
 ## iCloud sync — OFF
 `ProgressSync.enabled = false`. iCloud KVS needs the Key-value-storage

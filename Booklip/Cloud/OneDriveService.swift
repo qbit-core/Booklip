@@ -74,25 +74,21 @@ final class OneDriveService: ObservableObject {
         return results
     }
 
-    func download(_ file: CloudFile) async throws -> URL {
-        // Both branches must check the status: a 401 (stale token) or 404/410
-        // (expired pre-authenticated downloadUrl) returns a JSON error body that
-        // was previously written out and imported as the "book".
-        let data: Data
-        let response: URLResponse
+    func download(_ file: CloudFile, folderName: String? = nil) async throws -> URL {
+        // The downloader checks the status for both branches: a 401 (stale
+        // token) or 404/410 (expired pre-authenticated downloadUrl) returns a
+        // JSON error body that was previously imported as the "book".
+        var req: URLRequest
         if let urlString = file.downloadURL, let url = URL(string: urlString) {
-            (data, response) = try await URLSession.shared.data(from: url)
+            req = URLRequest(url: url)
         } else {
             // Fall back to Graph API download
             let accessToken = try await validAccessToken()
-            var req = URLRequest(url: URL(string: "\(Self.graphBase)/me/drive/items/\(file.id)/content")!)
+            req = URLRequest(url: URL(string: "\(Self.graphBase)/me/drive/items/\(file.id)/content")!)
             req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            (data, response) = try await URLSession.shared.data(for: req)
         }
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw CloudError.downloadFailed
-        }
-        return try writeTempFile(data, name: file.name)
+        // Background session: the transfer survives app suspension.
+        return try await BackgroundDownloader.shared.download(req, name: file.name, folderName: folderName)
     }
 
     // MARK: - Helpers
@@ -113,12 +109,6 @@ final class OneDriveService: ObservableObject {
             }
         }
         return t.accessToken
-    }
-
-    private func writeTempFile(_ data: Data, name: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        try data.write(to: url)
-        return url
     }
 
     private func save(_ t: OAuthSession.Token?) {

@@ -5,7 +5,8 @@ struct CloudConnectView: View {
     @StateObject private var oneDrive = OneDriveService()
     @StateObject private var googleDrive = GoogleDriveService()
     @StateObject private var dropbox = DropboxService()
-    let onImport: (URL) -> Void
+    /// (temp file URL, library folder name or nil for unfiled)
+    let onImport: (URL, String?) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var showOneDriveBrowser = false
@@ -87,7 +88,7 @@ struct CloudConnectView: View {
                 }
 
                 Section {
-                    Text("Browse a connected service and tap any supported book (.txt .epub .pdf .md) to import it.")
+                    Text("Browse a connected service and tap any supported book (.txt .epub .pdf .md) to import it. Use Select to pick several files, or whole folders — a folder is imported as a library folder.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)

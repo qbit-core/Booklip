@@ -7,13 +7,29 @@ struct BooklipApp: App {
     @StateObject private var settings = ReadingSettings()
 #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+#else
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 #endif
+
+    init() {
+        // Cloud downloads run in a background URLSession. Attach early so a
+        // relaunch-to-finish-a-transfer finds the session, and route files
+        // that finish with no one awaiting them (app was terminated) into the
+        // library exactly as a live import would.
+        BackgroundDownloader.shared.warmUp()
+    }
 
     var body: some Scene {
         WindowGroup {
             LibraryView()
                 .environmentObject(library)
                 .environmentObject(settings)
+                .onAppear {
+                    let lib = library
+                    BackgroundDownloader.shared.orphanHandler = { url, meta in
+                        lib.importBook(from: url, intoFolderNamed: meta.folderName)
+                    }
+                }
         }
 #if os(macOS)
         // Remove "New Window" from the File menu so the user can't manually
@@ -25,6 +41,23 @@ struct BooklipApp: App {
 #endif
     }
 }
+
+#if os(iOS)
+import UIKit
+
+class AppDelegate: NSObject, UIApplicationDelegate {
+    /// The system relaunched (or woke) the app because a background download
+    /// finished; hand the completion handler to the downloader, which calls it
+    /// once every delegate event for the session has been delivered.
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == BackgroundDownloader.sessionIdentifier else { completionHandler(); return }
+        BackgroundDownloader.shared.backgroundCompletionHandler = completionHandler
+        BackgroundDownloader.shared.warmUp()
+    }
+}
+#endif
 
 #if os(macOS)
 import AppKit

@@ -61,6 +61,35 @@ class LibraryViewModel: ObservableObject {
         if !on { selectedBookIDs.removeAll() }
     }
 
+    func setSelected(_ id: UUID, _ on: Bool) {
+        if on { selectedBookIDs.insert(id) } else { selectedBookIDs.remove(id) }
+    }
+
+    /// Select-all toggle over the books currently on screen: selects them all,
+    /// or clears the selection when every one of them is already selected.
+    func toggleSelectAll(_ visible: [Book]) {
+        let ids = Set(visible.map(\.id))
+        if !ids.isEmpty && ids.isSubset(of: selectedBookIDs) {
+            selectedBookIDs.subtract(ids)
+        } else {
+            selectedBookIDs.formUnion(ids)
+        }
+    }
+
+    func allSelected(_ visible: [Book]) -> Bool {
+        !visible.isEmpty && visible.allSatisfy { selectedBookIDs.contains($0.id) }
+    }
+
+    /// Books shown on the All Books tab for a search string.
+    func filteredBooks(search: String) -> [Book] {
+        let base = sorted(books)
+        guard !search.isEmpty else { return base }
+        return base.filter {
+            $0.title.localizedCaseInsensitiveContains(search) ||
+            $0.author.localizedCaseInsensitiveContains(search)
+        }
+    }
+
     func moveSelected(to folder: BookFolder?) {
         for i in books.indices where selectedBookIDs.contains(books[i].id) {
             books[i].folderID = folder?.id
@@ -131,7 +160,25 @@ class LibraryViewModel: ObservableObject {
         BookStore.save(books)
     }
 
+    /// The folder called `name` (case-insensitive), created on first use — a
+    /// cloud folder imported twice lands in the same library folder.
+    func folder(named name: String) -> BookFolder {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if let existing = folders.first(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return existing
+        }
+        let folder = BookFolder(name: trimmed.isEmpty ? "Untitled" : trimmed)
+        folders.append(folder)
+        BookStore.saveFolders(folders)
+        return folder
+    }
+
     // MARK: - Import
+
+    /// Cloud import entry point: `folderName` nil files the book as unfiled.
+    func importBook(from url: URL, intoFolderNamed folderName: String?) {
+        importBook(from: url, into: folderName.map { folder(named: $0) })
+    }
 
     func importBook(from url: URL, into folder: BookFolder? = nil) {
         isImporting = true
@@ -142,6 +189,12 @@ class LibraryViewModel: ObservableObject {
                 }
                 let originalName = url.deletingPathExtension().lastPathComponent
                 let fileName = try BookStore.importFile(from: url)
+                // Cloud downloads land in our temp directory; the copy above
+                // is the keeper, so drop the original instead of letting
+                // multi-MB files pile up in tmp.
+                if url.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+                    try? FileManager.default.removeItem(at: url)
+                }
                 let fileURL = BookStore.documentsDirectory.appendingPathComponent(fileName)
                 let parsed = try ParserFactory.parse(url: fileURL, format: format)
                 let fileNameStem = (fileName as NSString).deletingPathExtension

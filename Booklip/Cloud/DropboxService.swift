@@ -89,19 +89,28 @@ final class DropboxService: ObservableObject {
         return results
     }
 
-    func download(_ file: CloudFile) async throws -> URL {
+    func download(_ file: CloudFile, folderName: String? = nil) async throws -> URL {
         let accessToken = try await validAccessToken()
         var req = URLRequest(url: Self.downloadURL)
         req.httpMethod = "POST"
         req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        // Dropbox download takes its argument as a header, not a body
-        let arg = try JSONSerialization.data(withJSONObject: ["path": file.id])
-        req.setValue(String(data: arg, encoding: .utf8), forHTTPHeaderField: "Dropbox-API-Arg")
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw CloudError.downloadFailed
+        // Dropbox download takes its argument as a header, not a body. The
+        // header must be "HTTP header-safe JSON": non-ASCII (e.g. Korean file
+        // names) has to be \u-escaped or the request is rejected.
+        req.setValue(Self.headerSafeJSON(["path": file.id]), forHTTPHeaderField: "Dropbox-API-Arg")
+        // Background session: the transfer survives app suspension.
+        return try await BackgroundDownloader.shared.download(req, name: file.name, folderName: folderName)
+    }
+
+    private static func headerSafeJSON(_ object: [String: String]) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+        let raw = String(decoding: data, as: UTF8.self)
+        var out = ""
+        for scalar in raw.unicodeScalars {
+            if scalar.isASCII { out.unicodeScalars.append(scalar) }
+            else { for u in String(scalar).utf16 { out += String(format: "\\u%04x", u) } }
         }
-        return try writeTempFile(data, name: file.name)
+        return out
     }
 
     // MARK: - Helpers
@@ -124,12 +133,6 @@ final class DropboxService: ObservableObject {
         return t.accessToken
     }
 
-    private func writeTempFile(_ data: Data, name: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
-        try data.write(to: url)
-        return url
-    }
-
     private func save(_ t: OAuthSession.Token?) {
         if let t, let data = try? JSONEncoder().encode(t) {
             UserDefaults.standard.set(data, forKey: tokenKey)
@@ -143,5 +146,3 @@ final class DropboxService: ObservableObject {
         return try? JSONDecoder().decode(OAuthSession.Token.self, from: data)
     }
 }
-
-extension DropboxService: CloudBrowserService {}

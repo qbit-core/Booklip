@@ -33,7 +33,9 @@ struct LibraryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if library.isSelecting { SelectionBar() }
+                if library.isSelecting {
+                    SelectionBar(visible: selectedTab == .all ? library.filteredBooks(search: searchText) : [])
+                }
             }
             .navigationTitle("Library")
             .toolbar { toolbarContent }
@@ -47,7 +49,9 @@ struct LibraryView: View {
                 Text(library.importError ?? "")
             }
             .sheet(isPresented: $showingCloudConnect) {
-                CloudConnectView { url in library.importBook(from: url) }
+                CloudConnectView { url, folderName in
+                    library.importBook(from: url, intoFolderNamed: folderName)
+                }
             }
             .sheet(isPresented: $showingStats) { StatsView() }
             .overlay(alignment: .bottom) {
@@ -134,6 +138,8 @@ struct LibraryView: View {
 
 struct SelectionBar: View {
     @EnvironmentObject private var library: LibraryViewModel
+    /// Books on screen — what "All" selects.
+    var visible: [Book] = []
     @State private var showingDeleteConfirm = false
 
     var body: some View {
@@ -141,6 +147,11 @@ struct SelectionBar: View {
             Text("\(library.selectedBookIDs.count) selected")
                 .font(.subheadline.weight(.medium))
             Spacer()
+            if !visible.isEmpty {
+                Button(library.allSelected(visible) ? "None" : "All") {
+                    library.toggleSelectAll(visible)
+                }
+            }
             Menu {
                 Button("No Folder") { library.moveSelected(to: nil) }
                 if !library.folders.isEmpty { Divider() }
@@ -174,11 +185,12 @@ struct SelectionBar: View {
 
 struct BookSelectionModifier: ViewModifier {
     @EnvironmentObject private var library: LibraryViewModel
+    let books: [Book]
 
     func body(content: Content) -> some View {
         content
             .safeAreaInset(edge: .bottom) {
-                if library.isSelecting { SelectionBar() }
+                if library.isSelecting { SelectionBar(visible: books) }
             }
             .toolbar {
                 ToolbarItem(placement: .platformTrailing) {
@@ -199,7 +211,7 @@ struct BookSelectionModifier: ViewModifier {
 }
 
 extension View {
-    func bookSelection() -> some View { modifier(BookSelectionModifier()) }
+    func bookSelection(books: [Book]) -> some View { modifier(BookSelectionModifier(books: books)) }
 }
 
 // MARK: - Reusable view-mode & sort menus
@@ -252,16 +264,20 @@ struct BooksCollection: View {
         ScrollView {
             if let minWidth = library.viewMode.minCellWidth {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 16)], spacing: 16) {
-                    ForEach(books) { BookCardLink(book: $0) }
+                    ForEach(books) { BookCardLink(book: $0).dragSelectItem($0.id) }
                 }
                 .padding()
             } else {
                 LazyVStack(spacing: 8) {
-                    ForEach(books) { BookCardLink(book: $0) }
+                    ForEach(books) { BookCardLink(book: $0).dragSelectItem($0.id) }
                 }
                 .padding()
             }
         }
+        // Select mode: sweep a finger sideways across cards to (de)select them.
+        .dragSelection(enabled: library.isSelecting,
+                       isSelected: { (id: UUID) in library.selectedBookIDs.contains(id) },
+                       setSelected: { (id: UUID, on: Bool) in library.setSelected(id, on) })
     }
 }
 
@@ -272,14 +288,7 @@ private struct AllBooksView: View {
     @Binding var showingFilePicker: Bool
     @Binding var searchText: String
 
-    private var filtered: [Book] {
-        let base = library.sorted(library.books)
-        guard !searchText.isEmpty else { return base }
-        return base.filter {
-            $0.title.localizedCaseInsensitiveContains(searchText) ||
-            $0.author.localizedCaseInsensitiveContains(searchText)
-        }
-    }
+    private var filtered: [Book] { library.filteredBooks(search: searchText) }
 
     var body: some View {
         if filtered.isEmpty {
@@ -391,7 +400,7 @@ struct FolderDetailView: View {
             }
         }
         .navigationTitle(folder.name)
-        .bookSelection()
+        .bookSelection(books: library.books(in: folder))
     }
 }
 
@@ -400,7 +409,7 @@ struct UnfiledBooksView: View {
     var body: some View {
         BooksCollection(books: library.unfolderedBooks)
             .navigationTitle("Unfiled")
-            .bookSelection()
+            .bookSelection(books: library.unfolderedBooks)
     }
 }
 
