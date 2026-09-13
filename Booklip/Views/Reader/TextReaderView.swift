@@ -790,11 +790,11 @@ struct NativeTextView: UIViewRepresentable {
             context.coordinator.lastLayoutKey = layoutKey
             context.coordinator.lastColorKey = colorKey
             context.coordinator.lastContentKey = contentKey
-            let _applyT0 = CFAbsoluteTimeGetCurrent()
+            // LOG: let _applyT0 = CFAbsoluteTimeGetCurrent()
             applyContent(to: textView, coordinator: context.coordinator)
-            print(String(format: "[TIME] layoutChanged-applyContent %.0f ms  layout=%@ content=%@",
-                         (CFAbsoluteTimeGetCurrent() - _applyT0) * 1000,
-                         layoutKey as NSString, contentKey as NSString))
+            // LOG: print(String(format: "[TIME] layoutChanged-applyContent %.0f ms  layout=%@ content=%@",
+            // LOG: (CFAbsoluteTimeGetCurrent() - _applyT0) * 1000,
+            // LOG: layoutKey as NSString, contentKey as NSString))
             textView.backgroundColor = UIColor(settings.currentPreset.background)
             // EPUB: stableCharCount must match textStorage.length (which includes
             // U+FFFC attachment chars) so that charIdx computed in applySeek stays
@@ -839,10 +839,10 @@ struct NativeTextView: UIViewRepresentable {
                 let idx = searchResultIndex
                 let view = self
                 coord.currentSearchTask = Task { @MainActor in
-                    let _searchT0 = CFAbsoluteTimeGetCurrent()
+                    // LOG: let _searchT0 = CFAbsoluteTimeGetCurrent()
                     let matches = await sharedSearchActor.allMatches(of: query, in: str)
-                    print(String(format: "[TIME] iOSAllMatches %.0f ms  matches=%d query=%d",
-                                 (CFAbsoluteTimeGetCurrent() - _searchT0) * 1000, matches.count, query.count))
+                    // LOG: print(String(format: "[TIME] iOSAllMatches %.0f ms  matches=%d query=%d",
+                    // LOG: (CFAbsoluteTimeGetCurrent() - _searchT0) * 1000, matches.count, query.count))
                     guard !Task.isCancelled else { return }
                     coord.searchMatches = matches
                     guard let tv = coord.textView else { return }
@@ -869,16 +869,16 @@ struct NativeTextView: UIViewRepresentable {
                                          index: Int,
                                          coordinator: Coordinator) {
         let storage = textView.textStorage
-        let _t0 = CFAbsoluteTimeGetCurrent()
+        // LOG: let _t0 = CFAbsoluteTimeGetCurrent()
         let active = repaintSearchMatches(
             in: storage, matches: matches, index: index,
             painted: &coordinator.paintedSearchRanges,
             dim: UIColor.systemYellow.withAlphaComponent(0.3),
             bright: UIColor.systemYellow.withAlphaComponent(0.75)
         ) { storage, range in coordinator.reapplyUserHighlights(in: storage, over: range) }
-        print(String(format: "[TIME] searchRepaint %.0f ms  painted=%d of %d",
-                     (CFAbsoluteTimeGetCurrent() - _t0) * 1000,
-                     coordinator.paintedSearchRanges.count, matches.count))
+        // LOG: print(String(format: "[TIME] searchRepaint %.0f ms  painted=%d of %d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - _t0) * 1000,
+        // LOG: coordinator.paintedSearchRanges.count, matches.count))
         guard let active else { return }
         coordinator.isScrollingProgrammatically = true
         textView.scrollRangeToVisible(active)
@@ -949,31 +949,31 @@ struct NativeTextView: UIViewRepresentable {
                 }
             }
 
-            let spID = OSSignpostID(log: spLog)
-            os_signpost(.begin, log: spLog, name: "Phase1-attributedText", signpostID: spID,
-                        "blocks=%d images=%d", blocks.count, pending.count)
-            let _p1Start = CFAbsoluteTimeGetCurrent()
+            // LOG: let spID = OSSignpostID(log: spLog)
+            // LOG: os_signpost(.begin, log: spLog, name: "Phase1-attributedText", signpostID: spID,
+            // LOG: "blocks=%d images=%d", blocks.count, pending.count)
+            // LOG: let _p1Start = CFAbsoluteTimeGetCurrent()
             // Open-FirstLayout: setAttributedString → didLayout (end fires in Coordinator.didLayout).
             let flID = OSSignpostID(log: spLog)
             OpenSignpostState.shared.firstLayoutID = flID
             OpenSignpostState.shared.firstLayoutT0 = CFAbsoluteTimeGetCurrent()
-            os_signpost(.begin, log: spLog, name: "Open-FirstLayout", signpostID: flID,
-                        "chars=%d attachments=%d", result.length, pending.count)
+            // LOG: os_signpost(.begin, log: spLog, name: "Open-FirstLayout", signpostID: flID,
+            // LOG: "chars=%d attachments=%d", result.length, pending.count)
             textView.textStorage.beginEditing()
             textView.textStorage.setAttributedString(result)
             textView.textStorage.endEditing()
-            os_signpost(.end, log: spLog, name: "Phase1-attributedText", signpostID: spID)
-            print(String(format: "[TIME] Phase1-attributedText %.0f ms  chars=%d images=%d",
-                         (CFAbsoluteTimeGetCurrent() - _p1Start) * 1000, result.length, pending.count))
+            // LOG: os_signpost(.end, log: spLog, name: "Phase1-attributedText", signpostID: spID)
+            // LOG: print(String(format: "[TIME] Phase1-attributedText %.0f ms  chars=%d images=%d",
+            // LOG: (CFAbsoluteTimeGetCurrent() - _p1Start) * 1000, result.length, pending.count))
             // Probe (1): after setAttributedString.
-            let lm1 = textView.layoutManager
-            os_log("[NCL-1] after-setAttrStr(EPUB-P1) allow=%d has=%d vo=%d chars=%d attachments=%d",
-                   log: spLog, type: .info,
-                   lm1.allowsNonContiguousLayout ? 1 : 0,
-                   lm1.hasNonContiguousLayout ? 1 : 0,
-                   UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                   textView.textStorage.length,
-                   pending.count)
+            // LOG: let lm1 = textView.layoutManager
+            // LOG: os_log("[NCL-1] after-setAttrStr(EPUB-P1) allow=%d has=%d vo=%d chars=%d attachments=%d",
+            // LOG: log: spLog, type: .info,
+            // LOG: lm1.allowsNonContiguousLayout ? 1 : 0,
+            // LOG: lm1.hasNonContiguousLayout ? 1 : 0,
+            // LOG: UIAccessibility.isVoiceOverRunning ? 1 : 0,
+            // LOG: textView.textStorage.length,
+            // LOG: pending.count)
             applyHighlights(to: textView)
 
             guard !pending.isEmpty else { return }
@@ -1016,13 +1016,13 @@ struct NativeTextView: UIViewRepresentable {
                 }
                 DispatchQueue.main.async { [weak textView] in
                     guard let tv = textView else {
-                        os_log("[EPUB P2] textView nil — dismissed before decode finished",
-                               log: spLog, type: .info)
+                        // LOG: os_log("[EPUB P2] textView nil — dismissed before decode finished",
+                        // LOG: log: spLog, type: .info)
                         return
                     }
-                    let spID2 = OSSignpostID(log: spLog)
-                    os_signpost(.begin, log: spLog, name: "Phase2-addAttachment", signpostID: spID2,
-                                "images=%d", replacements.count)
+                    // LOG: let spID2 = OSSignpostID(log: spLog)
+                    // LOG: os_signpost(.begin, log: spLog, name: "Phase2-addAttachment", signpostID: spID2,
+                    // LOG: "images=%d", replacements.count)
                     let storage = tv.textStorage
                     storage.beginEditing()
                     for (offset, att) in replacements {
@@ -1053,28 +1053,28 @@ struct NativeTextView: UIViewRepresentable {
                                                 actualCharacterRange: &actual)
                         }
                     }
-                    os_signpost(.end, log: spLog, name: "Phase2-addAttachment", signpostID: spID2)
-                    os_log("[EPUB P2] attachment-attr swap + glyphInvalidate done, images=%d window=%d",
-                           log: spLog, type: .info, replacements.count, tv.window != nil ? 1 : 0)
+                    // LOG: os_signpost(.end, log: spLog, name: "Phase2-addAttachment", signpostID: spID2)
+                    // LOG: os_log("[EPUB P2] attachment-attr swap + glyphInvalidate done, images=%d window=%d",
+                    // LOG: log: spLog, type: .info, replacements.count, tv.window != nil ? 1 : 0)
                 }
             }
             return
         }
 
         if let attr = attributedText {
-            let spID = OSSignpostID(log: spLog)
-            os_signpost(.begin, log: spLog, name: "AttributedText-set", signpostID: spID)
+            // LOG: let spID = OSSignpostID(log: spLog)
+            // LOG: os_signpost(.begin, log: spLog, name: "AttributedText-set", signpostID: spID)
             textView.textStorage.beginEditing()
             textView.textStorage.setAttributedString(NSAttributedString(attr))
             textView.textStorage.endEditing()
-            os_signpost(.end, log: spLog, name: "AttributedText-set", signpostID: spID)
-            let lm2 = textView.layoutManager
-            os_log("[NCL-1] after-setAttrStr(attr) allow=%d has=%d vo=%d chars=%d attachments=0",
-                   log: spLog, type: .info,
-                   lm2.allowsNonContiguousLayout ? 1 : 0,
-                   lm2.hasNonContiguousLayout ? 1 : 0,
-                   UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                   textView.textStorage.length)
+            // LOG: os_signpost(.end, log: spLog, name: "AttributedText-set", signpostID: spID)
+            // LOG: let lm2 = textView.layoutManager
+            // LOG: os_log("[NCL-1] after-setAttrStr(attr) allow=%d has=%d vo=%d chars=%d attachments=0",
+            // LOG: log: spLog, type: .info,
+            // LOG: lm2.allowsNonContiguousLayout ? 1 : 0,
+            // LOG: lm2.hasNonContiguousLayout ? 1 : 0,
+            // LOG: UIAccessibility.isVoiceOverRunning ? 1 : 0,
+            // LOG: textView.textStorage.length)
             textView.font = font
             textView.textColor = color
         } else if let str = text {
@@ -1087,16 +1087,16 @@ struct NativeTextView: UIViewRepresentable {
             let capturedLS = settings.lineSpacing
             let capturedPS = paragraphStyle
             let viewCapture = self   // NativeTextView is a value type — safe to copy
-            let spID = OSSignpostID(log: spLog)
-            os_signpost(.begin, log: spLog, name: "PlainText-build", signpostID: spID,
-                        "chars=%d", (str as NSString).length)
-            let _buildStart = CFAbsoluteTimeGetCurrent()
+            // LOG: let spID = OSSignpostID(log: spLog)
+            // LOG: os_signpost(.begin, log: spLog, name: "PlainText-build", signpostID: spID,
+            // LOG: "chars=%d", (str as NSString).length)
+            // LOG: let _buildStart = CFAbsoluteTimeGetCurrent()
             // Open-FirstLayout: setAttributedString → didLayout (end fires in Coordinator.didLayout).
             let flID = OSSignpostID(log: spLog)
             OpenSignpostState.shared.firstLayoutID = flID
             OpenSignpostState.shared.firstLayoutT0 = CFAbsoluteTimeGetCurrent()
-            os_signpost(.begin, log: spLog, name: "Open-FirstLayout", signpostID: flID,
-                        "chars=%d attachments=0", (str as NSString).length)
+            // LOG: os_signpost(.begin, log: spLog, name: "Open-FirstLayout", signpostID: flID,
+            // LOG: "chars=%d attachments=0", (str as NSString).length)
             // NSAttributedString is not Sendable. We ferry it across the actor boundary
             // via an @unchecked Sendable box — written once on the detached task,
             // read once on MainActor; no concurrent access occurs.
@@ -1112,20 +1112,20 @@ struct NativeTextView: UIViewRepresentable {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
-                    os_signpost(.end, log: spLog, name: "PlainText-build", signpostID: spID)
-                    print(String(format: "[TIME] PlainText-build %.0f ms  utf16=%d",
-                                 (CFAbsoluteTimeGetCurrent() - _buildStart) * 1000, built.value.length))
+                    // LOG: os_signpost(.end, log: spLog, name: "PlainText-build", signpostID: spID)
+                    // LOG: print(String(format: "[TIME] PlainText-build %.0f ms  utf16=%d",
+                    // LOG: (CFAbsoluteTimeGetCurrent() - _buildStart) * 1000, built.value.length))
                     tvRef.textStorage.beginEditing()
                     tvRef.textStorage.setAttributedString(built.value)
                     tvRef.textStorage.endEditing()
                     // Probe (1): after setAttributedString — plain text path.
-                    let lm = tvRef.layoutManager
-                    os_log("[NCL-1] after-setAttrStr(plain) allow=%d has=%d vo=%d chars=%d attachments=0",
-                           log: spLog, type: .info,
-                           lm.allowsNonContiguousLayout ? 1 : 0,
-                           lm.hasNonContiguousLayout ? 1 : 0,
-                           UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                           tvRef.textStorage.length)
+                    // LOG: let lm = tvRef.layoutManager
+                    // LOG: os_log("[NCL-1] after-setAttrStr(plain) allow=%d has=%d vo=%d chars=%d attachments=0",
+                    // LOG: log: spLog, type: .info,
+                    // LOG: lm.allowsNonContiguousLayout ? 1 : 0,
+                    // LOG: lm.hasNonContiguousLayout ? 1 : 0,
+                    // LOG: UIAccessibility.isVoiceOverRunning ? 1 : 0,
+                    // LOG: tvRef.textStorage.length)
                     viewCapture.applyHighlights(to: tvRef)
                 }
             }
@@ -1307,11 +1307,11 @@ struct NativeTextView: UIViewRepresentable {
                 let seedCPP    = max(1, Int(charsPerLine * linesPerPage))
                 assert(pageStep <= textAreaH + 0.5,
                        "[PAGE-STEP] pageStep \(pageStep) > textAreaH \(textAreaH)")
-                print(String(format: "[PAGE-SIZE] bounds=%.0fx%.0f  textArea=%.0fx%.0f  insets=(%.0f,%.0f,%.0f,%.0f)  padding=%.0f",
-                             tv.bounds.width, tv.bounds.height, textAreaW, textAreaH,
-                             insets.top, insets.left, insets.bottom, insets.right, padding))
-                print(String(format: "[PAGE-STEP] lineHeight=%.1f linesPerPage=%.0f pageStep=%.1f textAreaH=%.0f  seedCPP=%d",
-                             lineHeight, linesPerPage, pageStep, textAreaH, seedCPP))
+                // LOG: print(String(format: "[PAGE-SIZE] bounds=%.0fx%.0f  textArea=%.0fx%.0f  insets=(%.0f,%.0f,%.0f,%.0f)  padding=%.0f",
+                // LOG: tv.bounds.width, tv.bounds.height, textAreaW, textAreaH,
+                // LOG: insets.top, insets.left, insets.bottom, insets.right, padding))
+                // LOG: print(String(format: "[PAGE-STEP] lineHeight=%.1f linesPerPage=%.0f pageStep=%.1f textAreaH=%.0f  seedCPP=%d",
+                // LOG: lineHeight, linesPerPage, pageStep, textAreaH, seedCPP))
 
                 // Seed total pages from cached profile or formula.
                 let profileKey = PaginationProfile.key(
@@ -1364,7 +1364,7 @@ struct NativeTextView: UIViewRepresentable {
 
         func updateHighlight(_ range: NSRange?, in textView: UITextView, color: UIColor) {
             guard !sameRange(range, lastHighlight) else { return }
-            let _hlT0 = CFAbsoluteTimeGetCurrent()
+            // LOG: let _hlT0 = CFAbsoluteTimeGetCurrent()
             let storage = textView.textStorage
             let prev = lastHighlight          // capture before overwriting
             lastHighlight = range
@@ -1391,9 +1391,9 @@ struct NativeTextView: UIViewRepresentable {
                 lastReportedProgress = v
                 DispatchQueue.main.async { [weak self] in self?.progress = v }
             }
-            let _rangeStr = range.map { "loc=\($0.location) len=\($0.length)" } ?? "nil"
-            print(String(format: "[TIME] updateHighlight %.0f ms  \(_rangeStr)",
-                         (CFAbsoluteTimeGetCurrent() - _hlT0) * 1000))
+            // LOG: let _rangeStr = range.map { "loc=\($0.location) len=\($0.length)" } ?? "nil"
+            // LOG: print(String(format: "[TIME] updateHighlight %.0f ms  \(_rangeStr)",
+            // LOG: (CFAbsoluteTimeGetCurrent() - _hlT0) * 1000))
         }
 
         // In vertical-slide mode: scroll so the highlighted sentence is visible.
@@ -1428,14 +1428,14 @@ struct NativeTextView: UIViewRepresentable {
             // With allowsNonContiguousLayout=true this is O(local) when the sentence
             // is near the current scroll position; O(N) only if there is a gap between
             // the last laid-out region and this range.
-            let spID = OSSignpostID(log: spLog)
-            let _ensureT0 = CFAbsoluteTimeGetCurrent()
-            os_signpost(.begin, log: spLog, name: "scrollToSentence-ensureLayout", signpostID: spID,
-                        "glyphs=%d", glyphRange.length)
+            // LOG: let spID = OSSignpostID(log: spLog)
+            // LOG: let _ensureT0 = CFAbsoluteTimeGetCurrent()
+            // LOG: os_signpost(.begin, log: spLog, name: "scrollToSentence-ensureLayout", signpostID: spID,
+            // LOG: "glyphs=%d", glyphRange.length)
             lm.ensureLayout(forGlyphRange: glyphRange)
-            os_signpost(.end, log: spLog, name: "scrollToSentence-ensureLayout", signpostID: spID)
-            print(String(format: "[TIME] scrollToSentence-ensureLayout %.0f ms  glyphs=%d",
-                         (CFAbsoluteTimeGetCurrent() - _ensureT0) * 1000, glyphRange.length))
+            // LOG: os_signpost(.end, log: spLog, name: "scrollToSentence-ensureLayout", signpostID: spID)
+            // LOG: print(String(format: "[TIME] scrollToSentence-ensureLayout %.0f ms  glyphs=%d",
+            // LOG: (CFAbsoluteTimeGetCurrent() - _ensureT0) * 1000, glyphRange.length))
 
             // Step 3: compute rect, check visibility, set offset.
             let rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
@@ -1622,16 +1622,16 @@ struct NativeTextView: UIViewRepresentable {
                 // from setContentOffset+layoutIfNeeded below so the split is visible.
                 let ensureRect = CGRect(x: 0, y: max(0, y - inset - viewH * 0.5),
                                         width: tc.size.width, height: viewH * 2)
-                let _tEnsure = CFAbsoluteTimeGetCurrent()
+                // LOG: let _tEnsure = CFAbsoluteTimeGetCurrent()
                 lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
-                let ensureMs = (CFAbsoluteTimeGetCurrent() - _tEnsure) * 1000
+                // LOG: let ensureMs = (CFAbsoluteTimeGetCurrent() - _tEnsure) * 1000
 
-                let _tStep0 = CFAbsoluteTimeGetCurrent()
+                // LOG: let _tStep0 = CFAbsoluteTimeGetCurrent()
                 isScrollingProgrammatically = true
                 tv.setContentOffset(CGPoint(x: 0, y: y), animated: false)
                 isScrollingProgrammatically = false
                 tv.layoutIfNeeded()
-                let stepMs = (CFAbsoluteTimeGetCurrent() - _tStep0) * 1000
+                // LOG: let stepMs = (CFAbsoluteTimeGetCurrent() - _tStep0) * 1000
                 // Defensive check for the exact regression found on device: UIScrollView
                 // can silently reject an offset into not-yet-laid-out content and snap
                 // back (commonly to 0) rather than throwing or failing ensureLayout —
@@ -1639,8 +1639,8 @@ struct NativeTextView: UIViewRepresentable {
                 // own `y`, not the actual contentOffset), so without this check a
                 // rejected jump looks identical to a successful one in the logs.
                 if abs(tv.contentOffset.y - y) > 5 {
-                    print(String(format: "[\(tag)] WARNING setContentOffset rejected: requested=%.0f actual=%.0f",
-                                 Double(y), Double(tv.contentOffset.y)))
+                    // LOG: print(String(format: "[\(tag)] WARNING setContentOffset rejected: requested=%.0f actual=%.0f",
+                    // LOG: Double(y), Double(tv.contentOffset.y)))
                 }
 
                 let visRect = CGRect(x: 0, y: max(0, y - inset), width: tc.size.width, height: viewH)
@@ -1705,23 +1705,23 @@ struct NativeTextView: UIViewRepresentable {
                     probeMs = (CFAbsoluteTimeGetCurrent() - _tProbe) * 1000
                     if probeMs > 400 {
                         charProbeDisabled = true
-                        print("[\(tag)] exact probe took \(Int(probeMs))ms — disabling for this session")
+                        // LOG: print("[\(tag)] exact probe took \(Int(probeMs))ms — disabling for this session")
                     }
                     if let probeY { dy = probeY - y }
                 }
 
                 let now = CFAbsoluteTimeGetCurrent()
-                let elapsedMs = (now - t0) * 1000
+                // LOG: let elapsedMs = (now - t0) * 1000
                 // Budget clock starts when attempt 0 finishes (see doc comment).
                 if attempt == 0 { budgetStart = now }
                 let budgetMs = (now - budgetStart) * 1000
-                print(String(format: "[\(tag)] attempt=%d landed=%.4f diff=%d density=%.4f dy=%.1f secantDy=%.1f probe=%.0fms ensureMs=%.0f stepMs=%.0f elapsed=%.0fms budget=%.0fms",
-                             attempt, landedProgress, charDiff, density, Double(dy), Double(secantDy), probeMs, ensureMs, stepMs, elapsedMs, budgetMs))
+                // LOG: print(String(format: "[\(tag)] attempt=%d landed=%.4f diff=%d density=%.4f dy=%.1f secantDy=%.1f probe=%.0fms ensureMs=%.0f stepMs=%.0f elapsed=%.0fms budget=%.0fms",
+                // LOG: attempt, landedProgress, charDiff, density, Double(dy), Double(secantDy), probeMs, ensureMs, stepMs, elapsedMs, budgetMs))
 
                 // [3] 350ms wall-clock budget for correction attempts (attempt 1+):
                 // stop immediately, snap to best below.
                 if attempt > 0, budgetMs > wallClockBudgetMs {
-                    print("[\(tag)] budget exceeded (\(Int(budgetMs))ms after attempt 0) — stopping, snapping to best")
+                    // LOG: print("[\(tag)] budget exceeded (\(Int(budgetMs))ms after attempt 0) — stopping, snapping to best")
                     break
                 }
                 guard abs(charDiff) > 300, attempt < maxAttempts - 1 else { break }
@@ -1733,8 +1733,8 @@ struct NativeTextView: UIViewRepresentable {
                 prevY = y
                 prevCharIdx = landedCharIdx
                 guard abs(correctedY - y) > 0.5 else {
-                    print(String(format: "[\(tag)] correction clamped at maxOffset=%.0f (wanted %.0f) — stopping",
-                                 Double(currentMaxOffset()), Double(y + dy)))
+                    // LOG: print(String(format: "[\(tag)] correction clamped at maxOffset=%.0f (wanted %.0f) — stopping",
+                    // LOG: Double(currentMaxOffset()), Double(y + dy)))
                     break
                 }
                 y = correctedY
@@ -1747,9 +1747,9 @@ struct NativeTextView: UIViewRepresentable {
                 isScrollingProgrammatically = true
                 tv.setContentOffset(CGPoint(x: 0, y: y), animated: false)
                 isScrollingProgrammatically = false
-                print(String(format: "[\(tag)] reverted to best charIdx=%d y=%.0f", bestCharIdx, Double(y)))
+                // LOG: print(String(format: "[\(tag)] reverted to best charIdx=%d y=%.0f", bestCharIdx, Double(y)))
             }
-            print(String(format: "[\(tag)] TOTAL elapsed=%.0fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+            // LOG: print(String(format: "[\(tag)] TOTAL elapsed=%.0fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
 
             // Report the FINAL landing. This used to fire after attempt 0, whose
             // proportional guess can be far off (e.g. 0.2% for a 5% target), so the
@@ -1761,8 +1761,8 @@ struct NativeTextView: UIViewRepresentable {
         private func applySeek(_ target: Double, in textView: UITextView, trigger: StaticString = "unknown") {
             guard target != lastAppliedSeekTarget else { return }
             lastAppliedSeekTarget = target
-            print(String(format: "[SEEK] trigger=%@ target=%.4f currentOffsetY=%.0f",
-                         "\(trigger)" as NSString, target, textView.contentOffset.y))
+            // LOG: print(String(format: "[SEEK] trigger=%@ target=%.4f currentOffsetY=%.0f",
+            // LOG: "\(trigger)" as NSString, target, textView.contentOffset.y))
 
             // Proportional pixel estimate — the landing loop's setContentOffset+
             // ensureLayout+layoutIfNeeded+glyphRange(forBoundingRect:) steps
@@ -1804,12 +1804,12 @@ struct NativeTextView: UIViewRepresentable {
                     }
                     self.vm?.isPositioning = false
 
-                    os_log("[NCL-3] applySeek-done allow=%d has=%d vo=%d target=%.3f offsetY=%.0f",
-                       log: spLog, type: .info,
-                       textView.layoutManager.allowsNonContiguousLayout ? 1 : 0,
-                       textView.layoutManager.hasNonContiguousLayout ? 1 : 0,
-                       UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                       target, result.y)
+                    // LOG: os_log("[NCL-3] applySeek-done allow=%d has=%d vo=%d target=%.3f offsetY=%.0f",
+                    // LOG: log: spLog, type: .info,
+                    // LOG: textView.layoutManager.allowsNonContiguousLayout ? 1 : 0,
+                    // LOG: textView.layoutManager.hasNonContiguousLayout ? 1 : 0,
+                    // LOG: UIAccessibility.isVoiceOverRunning ? 1 : 0,
+                    // LOG: target, result.y)
                     DispatchQueue.main.async { [weak self] in self?.isSeeking = false }
                 }
             }
@@ -1895,26 +1895,26 @@ struct NativeTextView: UIViewRepresentable {
                     self.lastReportedProgress = capturedTarget
                     self.progress = capturedTarget
                     // Probe (2): didLayout restore complete.
-                    let lmD = tv.layoutManager
-                    os_log("[NCL-2] didLayout-done allow=%d has=%d vo=%d offsetY=%.0f",
-                           log: spLog, type: .info,
-                           lmD.allowsNonContiguousLayout ? 1 : 0,
-                           lmD.hasNonContiguousLayout ? 1 : 0,
-                           UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                           tv.contentOffset.y)
+                    // LOG: let lmD = tv.layoutManager
+                    // LOG: os_log("[NCL-2] didLayout-done allow=%d has=%d vo=%d offsetY=%.0f",
+                    // LOG: log: spLog, type: .info,
+                    // LOG: lmD.allowsNonContiguousLayout ? 1 : 0,
+                    // LOG: lmD.hasNonContiguousLayout ? 1 : 0,
+                    // LOG: UIAccessibility.isVoiceOverRunning ? 1 : 0,
+                    // LOG: tv.contentOffset.y)
                     // Close Open-FirstLayout and Open-EndToEnd — both paired from applyContent/performLoad.
-                    let flID = OpenSignpostState.shared.firstLayoutID
-                    os_signpost(.end, log: spLog, name: "Open-FirstLayout", signpostID: flID,
-                                "offsetY=%.0f", tv.contentOffset.y)
-                    print(String(format: "[TIME] Open-FirstLayout %.0f ms  offsetY=%.0f",
-                                 (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.firstLayoutT0) * 1000, tv.contentOffset.y))
-                    let e2eID = OpenSignpostState.shared.endToEndID
-                    os_signpost(.end, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
-                                "offsetY=%.0f has=%d", tv.contentOffset.y,
-                                lmD.hasNonContiguousLayout ? 1 : 0)
-                    print(String(format: "[TIME] Open-EndToEnd %.0f ms  offsetY=%.0f has=%d",
-                                 (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.endToEndT0) * 1000, tv.contentOffset.y,
-                                 lmD.hasNonContiguousLayout ? 1 : 0))
+                    // LOG: let flID = OpenSignpostState.shared.firstLayoutID
+                    // LOG: os_signpost(.end, log: spLog, name: "Open-FirstLayout", signpostID: flID,
+                    // LOG: "offsetY=%.0f", tv.contentOffset.y)
+                    // LOG: print(String(format: "[TIME] Open-FirstLayout %.0f ms  offsetY=%.0f",
+                    // LOG: (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.firstLayoutT0) * 1000, tv.contentOffset.y))
+                    // LOG: let e2eID = OpenSignpostState.shared.endToEndID
+                    // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
+                    // LOG: "offsetY=%.0f has=%d", tv.contentOffset.y,
+                    // LOG: lmD.hasNonContiguousLayout ? 1 : 0)
+                    // LOG: print(String(format: "[TIME] Open-EndToEnd %.0f ms  offsetY=%.0f has=%d",
+                    // LOG: (CFAbsoluteTimeGetCurrent() - OpenSignpostState.shared.endToEndT0) * 1000, tv.contentOffset.y,
+                    // LOG: lmD.hasNonContiguousLayout ? 1 : 0))
                         // Trigger background pagination now that we know the stable bounds.
                         self.triggerPaginationIfNeeded(tv: tv)
                     }
@@ -1938,10 +1938,10 @@ struct NativeTextView: UIViewRepresentable {
             pageTargetY = nil      // user took over; forget any queued page target
             cancelRestore()   // and cancel any in-flight position restore
             if let tv = textView {
-                os_log("[NCL] (b) first scroll — allowsNonContiguousLayout=%d hasNonContiguousLayout=%d",
-                       log: spLog, type: .debug,
-                       tv.layoutManager.allowsNonContiguousLayout ? 1 : 0,
-                       tv.layoutManager.hasNonContiguousLayout ? 1 : 0)
+                // LOG: os_log("[NCL] (b) first scroll — allowsNonContiguousLayout=%d hasNonContiguousLayout=%d",
+                // LOG: log: spLog, type: .debug,
+                // LOG: tv.layoutManager.allowsNonContiguousLayout ? 1 : 0,
+                // LOG: tv.layoutManager.hasNonContiguousLayout ? 1 : 0)
             }
         }
 
@@ -2016,14 +2016,14 @@ struct NativeTextView: UIViewRepresentable {
             let sel = textView.selectedRange
             guard sel.length > 0 else { return }
             let _selT0 = CFAbsoluteTimeGetCurrent()
-            os_log("[NCL-4] textViewDidChangeSelection allow=%d has=%d vo=%d selLen=%d",
-                   log: spLog, type: .info,
-                   textView.layoutManager.allowsNonContiguousLayout ? 1 : 0,
-                   textView.layoutManager.hasNonContiguousLayout ? 1 : 0,
-                   UIAccessibility.isVoiceOverRunning ? 1 : 0,
-                   sel.length)
-            print(String(format: "[TIME] textSelection loc=%d len=%d",
-                         sel.location, sel.length))
+            // LOG: os_log("[NCL-4] textViewDidChangeSelection allow=%d has=%d vo=%d selLen=%d",
+            // LOG: log: spLog, type: .info,
+            // LOG: textView.layoutManager.allowsNonContiguousLayout ? 1 : 0,
+            // LOG: textView.layoutManager.hasNonContiguousLayout ? 1 : 0,
+            // LOG: UIAccessibility.isVoiceOverRunning ? 1 : 0,
+            // LOG: sel.length)
+            // LOG: print(String(format: "[TIME] textSelection loc=%d len=%d",
+            // LOG: sel.location, sel.length))
             _ = _selT0  // selection itself is instant; log location for context
         }
 
@@ -2053,7 +2053,7 @@ struct NativeTextView: UIViewRepresentable {
         private var pageTargetY: CGFloat?   // intended offset while a turn animates
 
         func page(_ tv: UITextView, forward: Bool) {
-            let _pageT0 = CFAbsoluteTimeGetCurrent()
+            // LOG: let _pageT0 = CFAbsoluteTimeGetCurrent()
             cancelRestore()   // user is navigating — don't let restore reset it
             let inset = tv.textContainerInset.top
             let visible = tv.bounds.height
@@ -2100,8 +2100,8 @@ struct NativeTextView: UIViewRepresentable {
             // under NCL instead of forcing full-document layout.
             let boundedGlyphRange = lm.glyphRange(forBoundingRect: ensureRect, in: tc)
             guard boundedGlyphRange.location != NSNotFound, boundedGlyphRange.length > 0 else {
-                print(String(format: "[PAGE] forward=%d STALLED no-glyphs-in-range base=%.0f refContainerY=%.0f",
-                             forward ? 1 : 0, base, refContainerY))
+                // LOG: print(String(format: "[PAGE] forward=%d STALLED no-glyphs-in-range base=%.0f refContainerY=%.0f",
+                // LOG: forward ? 1 : 0, base, refContainerY))
                 return
             }
             var glyphIdx = NSNotFound
@@ -2112,8 +2112,8 @@ struct NativeTextView: UIViewRepresentable {
                 }
             }
             guard glyphIdx != NSNotFound, glyphIdx < lm.numberOfGlyphs else {
-                print(String(format: "[PAGE] forward=%d STALLED glyphIdx-not-found base=%.0f refContainerY=%.0f",
-                             forward ? 1 : 0, base, refContainerY))
+                // LOG: print(String(format: "[PAGE] forward=%d STALLED glyphIdx-not-found base=%.0f refContainerY=%.0f",
+                // LOG: forward ? 1 : 0, base, refContainerY))
                 return
             }
             // characterIndexForGlyph is O(1): glyph→char map built by ensureLayout.
@@ -2127,17 +2127,17 @@ struct NativeTextView: UIViewRepresentable {
             let maxOffset = max(0, tv.contentSize.height - visible)
             let finalTarget = min(max(0, rect.minY + inset), maxOffset)
             guard abs(finalTarget - base) > 1 else {
-                print(String(format: "[PAGE] forward=%d STALLED no-movement base=%.0f finalTarget=%.0f refContainerY=%.0f maxOffset=%.0f pageStep=%.1f",
-                             forward ? 1 : 0, base, finalTarget, refContainerY, maxOffset, pageStep))
+                // LOG: print(String(format: "[PAGE] forward=%d STALLED no-movement base=%.0f finalTarget=%.0f refContainerY=%.0f maxOffset=%.0f pageStep=%.1f",
+                // LOG: forward ? 1 : 0, base, finalTarget, refContainerY, maxOffset, pageStep))
                 return
             }
             pageTargetY = finalTarget
             let charIdx = pageCharMap[capturedPageIndex] ?? 0
-            let total = stableCharCount > 0 ? stableCharCount : tv.textStorage.length
-            let pageProgress = total > 0 ? Double(charIdx) / Double(total) : 0
-            print(String(format: "[PAGE] forward=%d offsetY=%.0f charIdx=%d progress=%.4f  (%.0f ms)",
-                         forward ? 1 : 0, finalTarget, charIdx, pageProgress,
-                         (CFAbsoluteTimeGetCurrent() - _pageT0) * 1000))
+            // LOG: let total = stableCharCount > 0 ? stableCharCount : tv.textStorage.length
+            // LOG: let pageProgress = total > 0 ? Double(charIdx) / Double(total) : 0
+            // LOG: print(String(format: "[PAGE] forward=%d offsetY=%.0f charIdx=%d progress=%.4f  (%.0f ms)",
+            // LOG: forward ? 1 : 0, finalTarget, charIdx, pageProgress,
+            // LOG: (CFAbsoluteTimeGetCurrent() - _pageT0) * 1000))
 
             // Calibration sample collection — [2] filter: 20–2000 range, median,
             // skip the first turn after any seek so a bad delta doesn't corrupt data.
@@ -2147,9 +2147,9 @@ struct NativeTextView: UIViewRepresentable {
                     pageCharDeltas.append(delta)
                     if pageCharDeltas.count == 10 {
                         let median = pageCharDeltas.sorted()[5]   // 10 samples → index 5
-                        print(String(format: "[PAGE-CAL] 10-sample median charsPerPage=%d  (min=%d max=%d)  key=%@",
-                                     median, pageCharDeltas.min()!, pageCharDeltas.max()!,
-                                     currentProfileKey as NSString))
+                        // LOG: print(String(format: "[PAGE-CAL] 10-sample median charsPerPage=%d  (min=%d max=%d)  key=%@",
+                        // LOG: median, pageCharDeltas.min()!, pageCharDeltas.max()!,
+                        // LOG: currentProfileKey as NSString))
                         pageCharDeltas.removeAll()
                         hasLockedCharsPerPage = true    // [3]: lock at most once per session
                         let capturedVM2 = vm

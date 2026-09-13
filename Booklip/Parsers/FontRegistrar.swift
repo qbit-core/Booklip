@@ -83,7 +83,7 @@ enum FontRegistrar {
                 }
             }
             if resolved != preferred {
-                print("[Font] \(preferred) lacks glyphs for this book's text — rendering body with \(resolved)")
+                // LOG: print("[Font] \(preferred) lacks glyphs for this book's text — rendering body with \(resolved)")
             }
         }
         effectiveFontCache[key] = resolved
@@ -151,8 +151,8 @@ enum FontRegistrar {
             if !ok || glyphs.allSatisfy({ $0 == 0 }) { missing += 1 }
         }
         let coverage = 1.0 - Double(missing) / Double(max(1, checked))
-        print(String(format: "[Font] coverage %@ = %.0f%% (%d/%d sampled chars)",
-                     fontName as NSString, coverage * 100, checked - missing, checked))
+        // LOG: print(String(format: "[Font] coverage %@ = %.0f%% (%d/%d sampled chars)",
+        // LOG: fontName as NSString, coverage * 100, checked - missing, checked))
         return coverage
     }
 
@@ -169,14 +169,14 @@ enum FontRegistrar {
         var fontData = data
         if isWOFF(data) {
             guard let converted = sfntData(fromWOFF: data) else {
-                print("[Font] WOFF→SFNT conversion failed (corrupt or unsupported table compression)")
+                // LOG: print("[Font] WOFF→SFNT conversion failed (corrupt or unsupported table compression)")
                 return nil
             }
             fontData = converted
         } else if isWOFF2(data) {
             // WOFF2 compresses tables with Brotli, which has no built-in Apple
             // decoder — would need to vendor a Brotli implementation to support it.
-            print("[Font] WOFF2 embedded font unsupported (Brotli compression) — skipping")
+            // LOG: print("[Font] WOFF2 embedded font unsupported (Brotli compression) — skipping")
             return nil
         }
 
@@ -188,7 +188,7 @@ enum FontRegistrar {
         guard let descriptor = descriptors?.first,
               let psName = CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute) as? String
         else {
-            print("[Font] CTFontManagerCreateFontDescriptorsFromData failed, bytes=\(fontData.count)")
+            // LOG: print("[Font] CTFontManagerCreateFontDescriptorsFromData failed, bytes=\(fontData.count)")
             return nil
         }
 
@@ -199,7 +199,7 @@ enum FontRegistrar {
             // font. Drop the old registration so this one can take the name.
             var unregError: Unmanaged<CFError>?
             let removed = CTFontManagerUnregisterFontsForURL(existing.url as CFURL, .process, &unregError)
-            print("[Font] replacing \(psName) (different bytes); unregister ok=\(removed)")
+            // LOG: print("[Font] replacing \(psName) (different bytes); unregister ok=\(removed)")
             registered[psName] = nil
             // Keep the old temp file on disk — attributed strings from the previous
             // book may still hold a reference to it.
@@ -221,7 +221,7 @@ enum FontRegistrar {
         if ok {
             registered[psName] = (tmp, digest)
             fontFileURLs.append(tmp)   // keep the file alive
-            print("[Font] registered \(psName) bytes=\(fontData.count)")
+            // LOG: print("[Font] registered \(psName) bytes=\(fontData.count)")
             return psName
         }
         // Take ownership of the returned CFError exactly once. (A previous version
@@ -231,12 +231,12 @@ enum FontRegistrar {
         let error: CFError? = cfError?.takeRetainedValue()
         // Already registered by the system or a previous call → still usable.
         if let error, CFErrorGetCode(error) == CTFontManagerError.alreadyRegistered.rawValue {
-            print("[Font] \(psName) already registered (system or earlier) — reusing by name")
+            // LOG: print("[Font] \(psName) already registered (system or earlier) — reusing by name")
             registered[psName] = (tmp, digest)
             fontFileURLs.append(tmp)   // keep it; the URL may still be referenced
             return psName
         }
-        print("[Font] registration failed for \(psName): \(error.map { "\($0)" } ?? "?")")
+        // LOG: print("[Font] registration failed for \(psName): \(error.map { "\($0)" } ?? "?")")
         try? FileManager.default.removeItem(at: tmp)   // registration failed — clean up
         return nil
     }

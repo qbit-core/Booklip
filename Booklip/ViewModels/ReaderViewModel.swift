@@ -17,7 +17,7 @@ private struct BookLoader: Sendable {
                 options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
             )) ?? AttributedString("")
         }
-        print("[ReaderVM] parsed \((parsed.plainText as NSString).length) utf16, \(parsed.blocks.count) blocks, \(parsed.embeddedFonts.count) fonts, \(parsed.chapters.count) chapters")
+        // LOG: print("[ReaderVM] parsed \((parsed.plainText as NSString).length) utf16, \(parsed.blocks.count) blocks, \(parsed.embeddedFonts.count) fonts, \(parsed.chapters.count) chapters")
         return (parsed.plainText, attributed, parsed.blocks, parsed.embeddedFonts, parsed.chapters)
     }
 }
@@ -101,8 +101,8 @@ class ReaderViewModel: ObservableObject {
         let progress = oldTotal > 0 ? Double(currentPage) / Double(oldTotal) : 0
         estimatedTotalPages = total
         currentPage = max(1, min(Int(progress * Double(total)) + 1, total))
-        print(String(format: "[PAGE-CAL] locked charsPerPage=%d totalPages=%d currentPage=%d",
-                     cpp, total, currentPage))
+        // LOG: print(String(format: "[PAGE-CAL] locked charsPerPage=%d totalPages=%d currentPage=%d",
+        // LOG: cpp, total, currentPage))
     }
 
     let book: Book
@@ -239,14 +239,14 @@ class ReaderViewModel: ObservableObject {
         // Open-EndToEnd: file selected → didLayout complete (end fires in Coordinator.didLayout).
         let e2eID = OSSignpostID(log: booklipSpLog)
         OpenSignpostState.shared.endToEndID = e2eID
-        os_signpost(.begin, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
-                    "format=%{public}s", book.format.rawValue)
+        // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-EndToEnd", signpostID: e2eID,
+        // LOG: "format=%{public}s", book.format.rawValue)
         let _e2eStart = CFAbsoluteTimeGetCurrent()
         OpenSignpostState.shared.endToEndT0 = _e2eStart
 
         let fileURL = book.fileURL
         let format = book.format
-        print("[TIME] Open-EndToEnd BEGIN format=\(format)")
+        // LOG: print("[TIME] Open-EndToEnd BEGIN format=\(format)")
 
         // Use a continuation so the background work runs at the same QoS
         // as the caller (user-interactive), avoiding priority inversion.
@@ -267,10 +267,10 @@ class ReaderViewModel: ObservableObject {
                 plainText = result.1
             } else {
                 let loader = BookLoader(url: fileURL, format: format)
-                let vmLoadID = OSSignpostID(log: booklipSpLog)
-                os_signpost(.begin, log: booklipSpLog, name: "Open-VMLoad", signpostID: vmLoadID,
-                            "url=%{public}s", fileURL.lastPathComponent)
-                let _vmStart = CFAbsoluteTimeGetCurrent()
+                // LOG: let vmLoadID = OSSignpostID(log: booklipSpLog)
+                // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-VMLoad", signpostID: vmLoadID,
+                // LOG: "url=%{public}s", fileURL.lastPathComponent)
+                // LOG: let _vmStart = CFAbsoluteTimeGetCurrent()
                 let (text, attr, parsedBlocks, fonts, parsedChapters): (String, AttributedString, [ContentBlock], [Data], [Chapter]) = try await withCheckedThrowingContinuation { continuation in
                     DispatchQueue.global(qos: .userInteractive).async {
                         do {
@@ -280,10 +280,10 @@ class ReaderViewModel: ObservableObject {
                         }
                     }
                 }
-                os_signpost(.end, log: booklipSpLog, name: "Open-VMLoad", signpostID: vmLoadID,
-                            "chars=%d blocks=%d", (text as NSString).length, parsedBlocks.count)
-                print(String(format: "[TIME] Open-VMLoad %.0f ms  utf16=%d blocks=%d",
-                             (CFAbsoluteTimeGetCurrent() - _vmStart) * 1000, (text as NSString).length, parsedBlocks.count))
+                // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-VMLoad", signpostID: vmLoadID,
+                // LOG: "chars=%d blocks=%d", (text as NSString).length, parsedBlocks.count)
+                // LOG: print(String(format: "[TIME] Open-VMLoad %.0f ms  utf16=%d blocks=%d",
+                // LOG: (CFAbsoluteTimeGetCurrent() - _vmStart) * 1000, (text as NSString).length, parsedBlocks.count))
                 plainText = text
                 attributedText = attr
                 blocks = parsedBlocks
@@ -300,11 +300,11 @@ class ReaderViewModel: ObservableObject {
             }
         } catch {
             errorMessage = error.localizedDescription
-            print("[ReaderVM] error: \(error)")
+            // LOG: print("[ReaderVM] error: \(error)")
         }
 
         isLoading = false
-        print("[ReaderVM] done isLoading=false utf16=\((plainText as NSString).length)")
+        // LOG: print("[ReaderVM] done isLoading=false utf16=\((plainText as NSString).length)")
     }
 
     func updateProgress(_ value: Double) {

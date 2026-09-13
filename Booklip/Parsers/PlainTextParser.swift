@@ -11,10 +11,10 @@ struct PlainTextParser: BookParser, Sendable {
     }
 
     nonisolated private func readText(from url: URL) throws -> String {
-        let t0 = CFAbsoluteTimeGetCurrent()
+        // LOG: let t0 = CFAbsoluteTimeGetCurrent()
         let data = try Data(contentsOf: url)
-        print(String(format: "[TIME] Open-ParseHTML(txt-load) %.0f ms  bytes=%d",
-                     (CFAbsoluteTimeGetCurrent() - t0) * 1000, data.count))
+        // LOG: print(String(format: "[TIME] Open-ParseHTML(txt-load) %.0f ms  bytes=%d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - t0) * 1000, data.count))
 
         let encodings: [String.Encoding] = [
             .utf8,
@@ -25,19 +25,19 @@ struct PlainTextParser: BookParser, Sendable {
             .isoLatin1,
         ]
 
-        let t1 = CFAbsoluteTimeGetCurrent()
+        // LOG: let t1 = CFAbsoluteTimeGetCurrent()
         for encoding in encodings {
             if let text = String(data: data, encoding: encoding), !text.isEmpty {
-                print(String(format: "[TIME] Open-ParseHTML(txt-decode) %.0f ms  encoding=%@ utf16=%d",
-                             (CFAbsoluteTimeGetCurrent() - t1) * 1000,
-                             "\(encoding)" as NSString, (text as NSString).length))
+                // LOG: print(String(format: "[TIME] Open-ParseHTML(txt-decode) %.0f ms  encoding=%@ utf16=%d",
+                // LOG: (CFAbsoluteTimeGetCurrent() - t1) * 1000,
+                // LOG: "\(encoding)" as NSString, (text as NSString).length))
                 return text
             }
         }
 
         let fallback = String(data: data, encoding: .isoLatin1) ?? ""
-        print(String(format: "[TIME] Open-ParseHTML(txt-decode) %.0f ms  encoding=isoLatin1(fallback) utf16=%d",
-                     (CFAbsoluteTimeGetCurrent() - t1) * 1000, (fallback as NSString).length))
+        // LOG: print(String(format: "[TIME] Open-ParseHTML(txt-decode) %.0f ms  encoding=isoLatin1(fallback) utf16=%d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - t1) * 1000, (fallback as NSString).length))
         return fallback
     }
 }

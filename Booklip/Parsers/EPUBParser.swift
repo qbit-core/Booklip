@@ -40,15 +40,15 @@ struct EPUBParser: BookParser, Sendable {
 
     nonisolated func parse(url: URL) throws -> ParsedBook {
         // Open-Unzip: archive open + OPF metadata read.
-        let unzipID = OSSignpostID(log: booklipSpLog)
-        os_signpost(.begin, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
-                    "file=%{public}s", url.lastPathComponent)
+        // LOG: let unzipID = OSSignpostID(log: booklipSpLog)
+        // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
+        // LOG: "file=%{public}s", url.lastPathComponent)
         let archive: Archive
         do {
             archive = try Archive(url: url, accessMode: .read)
         } catch {
-            os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
-                        "status=failed")
+            // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
+            // LOG: "status=failed")
             throw EPUBError.cannotOpenArchive
         }
 
@@ -60,22 +60,22 @@ struct EPUBParser: BookParser, Sendable {
         // single biggest contributor to the ~32s parse, ahead of even the stripHTML
         // cost. Build the path→Entry map with ONE full scan up front; every
         // subsequent readEntry/readData call becomes an in-memory O(1) lookup.
-        let _indexT0 = CFAbsoluteTimeGetCurrent()
+        // LOG: let _indexT0 = CFAbsoluteTimeGetCurrent()
         let entryIndex: [String: Entry] = Dictionary(archive.map { ($0.path, $0) },
                                                       uniquingKeysWith: { first, _ in first })
-        print(String(format: "[TIME] Open-BuildEntryIndex %.0f ms  entries=%d",
-                     (CFAbsoluteTimeGetCurrent() - _indexT0) * 1000, entryIndex.count))
+        // LOG: print(String(format: "[TIME] Open-BuildEntryIndex %.0f ms  entries=%d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - _indexT0) * 1000, entryIndex.count))
 
         let containerXML = try readEntry("META-INF/container.xml", in: archive, index: entryIndex)
         let opfPath = try extractOPFPath(from: containerXML)
         let opfXML = try readEntry(opfPath, in: archive, index: entryIndex)
-        os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
-                    "status=ok opfPath=%{public}s", opfPath)
+        // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-Unzip", signpostID: unzipID,
+        // LOG: "status=ok opfPath=%{public}s", opfPath)
 
         let opfBase = (opfPath as NSString).deletingLastPathComponent
         let opf = try parseOPF(opfXML, base: opfBase)
         let spineHrefs = opf.hrefs
-        print("[EPUB] spine=\(spineHrefs.count) fonts=\(opf.fontHrefs.count)")
+        // LOG: print("[EPUB] spine=\(spineHrefs.count) fonts=\(opf.fontHrefs.count)")
 
         // Extract (and de-obfuscate) embedded fonts.
         let fonts = extractFonts(opf.fontHrefs, cssHrefs: opf.cssHrefs, base: opfBase,
@@ -93,9 +93,9 @@ struct EPUBParser: BookParser, Sendable {
         var hrefToOffset: [String: Int] = [:]   // spine href (no fragment) → start offset
         var imageBlockCount = 0
 
-        let parseID = OSSignpostID(log: booklipSpLog)
-        os_signpost(.begin, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
-                    "spine=%d", spineHrefs.count)
+        // LOG: let parseID = OSSignpostID(log: booklipSpLog)
+        // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
+        // LOG: "spine=%d", spineHrefs.count)
 
         // Phase 1 (serial): ZIPFoundation's Archive is not safe for concurrent
         // reads, so all HTML must be pulled off the zip on this thread. Cheap
@@ -111,10 +111,10 @@ struct EPUBParser: BookParser, Sendable {
             let titleHint: String?
             var segments: [RawSegment]
         }
-        let _phase1T0 = CFAbsoluteTimeGetCurrent()
-        let readID = OSSignpostID(log: booklipSpLog)
-        os_signpost(.begin, log: booklipSpLog, name: "Open-ReadHTML", signpostID: readID,
-                    "spine=%d", spineHrefs.count)
+        // LOG: let _phase1T0 = CFAbsoluteTimeGetCurrent()
+        // LOG: let readID = OSSignpostID(log: booklipSpLog)
+        // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-ReadHTML", signpostID: readID,
+        // LOG: "spine=%d", spineHrefs.count)
         var chapterRaws: [ChapterRaw] = []
         chapterRaws.reserveCapacity(spineHrefs.count)
         for (i, href) in spineHrefs.enumerated() {
@@ -124,7 +124,7 @@ struct EPUBParser: BookParser, Sendable {
             let entryPath = resolvePath(href, relativeTo: opfBase)
             let chapterDir = (entryPath as NSString).deletingLastPathComponent
             guard let html = try? readEntry(entryPath, in: archive, index: entryIndex) else {
-                print("[EPUB] spine entry not found in archive: \(entryPath)")
+                // LOG: print("[EPUB] spine entry not found in archive: \(entryPath)")
                 continue
             }
             let decodedHref = href.removingPercentEncoding ?? href
@@ -146,16 +146,16 @@ struct EPUBParser: BookParser, Sendable {
                 segments: segs))
             _ = i
         }
-        os_signpost(.end, log: booklipSpLog, name: "Open-ReadHTML", signpostID: readID)
-        print(String(format: "[TIME] Open-ReadHTML(Phase1) %.0f ms  chapters=%d",
-                     (CFAbsoluteTimeGetCurrent() - _phase1T0) * 1000, chapterRaws.count))
+        // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-ReadHTML", signpostID: readID)
+        // LOG: print(String(format: "[TIME] Open-ReadHTML(Phase1) %.0f ms  chapters=%d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - _phase1T0) * 1000, chapterRaws.count))
 
         // Phase 2 (concurrent): stripHTML is a pure function over its String
         // argument — no shared mutable state — so every chunk across every
         // chapter can run across all cores at once. This is the part that was
         // ~38s serial; precompiled regexes + concurrentPerform address both
         // the compilation overhead and the single-core bottleneck.
-        let _phase2T0 = CFAbsoluteTimeGetCurrent()
+        // LOG: let _phase2T0 = CFAbsoluteTimeGetCurrent()
         struct TextWork { let ci: Int; let si: Int; let text: String }
         var works: [TextWork] = []
         for (ci, ch) in chapterRaws.enumerated() {
@@ -163,9 +163,9 @@ struct EPUBParser: BookParser, Sendable {
                 if case .text(let t) = seg.kind { works.append(TextWork(ci: ci, si: si, text: t)) }
             }
         }
-        let stripID = OSSignpostID(log: booklipSpLog)
-        os_signpost(.begin, log: booklipSpLog, name: "Open-StripHTML", signpostID: stripID,
-                    "chunks=%d", works.count)
+        // LOG: let stripID = OSSignpostID(log: booklipSpLog)
+        // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-StripHTML", signpostID: stripID,
+        // LOG: "chunks=%d", works.count)
         var strippedResults = [String](repeating: "", count: works.count)
         if !works.isEmpty {
             strippedResults.withUnsafeMutableBufferPointer { buf in
@@ -174,12 +174,12 @@ struct EPUBParser: BookParser, Sendable {
                 }
             }
         }
-        os_signpost(.end, log: booklipSpLog, name: "Open-StripHTML", signpostID: stripID)
+        // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-StripHTML", signpostID: stripID)
         for (i, work) in works.enumerated() {
             chapterRaws[work.ci].segments[work.si].stripped = strippedResults[i]
         }
-        print(String(format: "[TIME] Open-StripHTML(Phase2) %.0f ms  chunks=%d",
-                     (CFAbsoluteTimeGetCurrent() - _phase2T0) * 1000, works.count))
+        // LOG: print(String(format: "[TIME] Open-StripHTML(Phase2) %.0f ms  chunks=%d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - _phase2T0) * 1000, works.count))
 
         // Phase 3 (serial): image reads need the archive again; text assembly
         // must preserve spine + in-chapter segment order for offsets to be correct.
@@ -202,10 +202,10 @@ struct EPUBParser: BookParser, Sendable {
         // ("\u{FFFC}\n\n"). Previously images contributed nothing here, so every
         // plainText-space value (TTS spokenRange, Chapter.progress, saved charIndex)
         // drifted 3 units per preceding image when applied to the storage.
-        let _phase3T0 = CFAbsoluteTimeGetCurrent()
-        let assembleID = OSSignpostID(log: booklipSpLog)
-        os_signpost(.begin, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
-                    "chapters=%d", chapterRaws.count)
+        // LOG: let _phase3T0 = CFAbsoluteTimeGetCurrent()
+        // LOG: let assembleID = OSSignpostID(log: booklipSpLog)
+        // LOG: os_signpost(.begin, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
+        // LOG: "chapters=%d", chapterRaws.count)
         var runningOffset = 0
         var parts: [String] = []
         parts.reserveCapacity(works.count * 2)
@@ -237,14 +237,14 @@ struct EPUBParser: BookParser, Sendable {
             }
         }
         fullText = parts.joined()
-        os_signpost(.end, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
-                    "chars=%d", runningOffset)
-        print(String(format: "[TIME] Open-AssembleText(Phase3) %.0f ms  chars=%d images=%d",
-                     (CFAbsoluteTimeGetCurrent() - _phase3T0) * 1000, runningOffset, imageBlockCount))
+        // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-AssembleText", signpostID: assembleID,
+        // LOG: "chars=%d", runningOffset)
+        // LOG: print(String(format: "[TIME] Open-AssembleText(Phase3) %.0f ms  chars=%d images=%d",
+        // LOG: (CFAbsoluteTimeGetCurrent() - _phase3T0) * 1000, runningOffset, imageBlockCount))
 
-        os_signpost(.end, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
-                    "chars=%d blocks=%d images=%d",
-                    runningOffset, blocks.count, imageBlockCount)
+        // LOG: os_signpost(.end, log: booklipSpLog, name: "Open-ParseHTML", signpostID: parseID,
+        // LOG: "chars=%d blocks=%d images=%d",
+        // LOG: runningOffset, blocks.count, imageBlockCount)
 
         let totalLen = max(1, runningOffset)
 
@@ -375,7 +375,7 @@ struct EPUBParser: BookParser, Sendable {
         for href in hrefs { add(resolvePath(href, relativeTo: base)) }
         for path in index.keys.sorted() where Self.isFontPath(path) { add(path) }
 
-        print("[EPUB] font candidates=\(paths)")
+        // LOG: print("[EPUB] font candidates=\(paths)")
         guard !paths.isEmpty else { return [] }
 
         // Which font paths are obfuscated, and by which algorithm?
