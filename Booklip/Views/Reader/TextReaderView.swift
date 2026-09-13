@@ -94,6 +94,12 @@ struct TextReaderView: View {
                 vm.addHighlight(range: req.range, colorName: req.colorName,
                                 snippet: req.snippet, progress: req.progress)
             }
+            // The mac representable takes the direction as a plain value (no
+            // @Binding — see the note on `autoScrolling`), so the reset to 0 after
+            // a page turn happens here, where the binding legitimately lives.
+            .onChange(of: pageNavigationDirection) { _, dir in
+                if dir != 0 { DispatchQueue.main.async { pageNavigationDirection = 0 } }
+            }
 #else
         nativeTextView(progress: $vm.progress)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -117,6 +123,7 @@ struct TextReaderView: View {
                 vm.addHighlight(range: range, colorName: color, snippet: snippet, progress: p)
             },
             progress: progress,
+            pageNavigationDirection: pageNavigationDirection,
             spokenRange: tts.spokenRange,
             searchQuery: searchQuery,
             searchResultIndex: searchResultIndex,
@@ -198,6 +205,8 @@ struct NativeTextView: NSViewRepresentable {
     var highlights: [Highlight] = []
     var onAddHighlight: (NSRange, String, String, Double) -> Void = { _, _, _, _ in }
     var progress: Double
+    /// +1 = next page, -1 = previous, 0 = idle. Plain value; the wrapper resets it.
+    var pageNavigationDirection: Int = 0
     var spokenRange: NSRange?
     var searchQuery: String = ""
     var searchResultIndex: Int = 0
@@ -220,6 +229,13 @@ struct NativeTextView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 20, height: 60)
         textView.autoresizingMask = [.width]
+        // Same engine as iOS: touching `layoutManager` opts this view into TextKit 1,
+        // and non-contiguous layout lets the character-based progress/restore code
+        // (glyphRange(forBoundingRect:), ensureLayout(forCharacterRange:) + line
+        // fragment probe) work on multi-MB books without laying out the whole
+        // document. Progress on macOS used to be a pixel ratio, which drifts as
+        // TextKit's estimated document height changes (47% → 30% on one page turn).
+        textView.layoutManager?.allowsNonContiguousLayout = true
         let recognizer = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
         recognizer.numberOfClicksRequired = 1
         textView.addGestureRecognizer(recognizer)
@@ -232,13 +248,27 @@ struct NativeTextView: NSViewRepresentable {
             object: scrollView
         )
         context.coordinator.installKeyMonitor()
+        // Layer-backed so page turns can animate with a CATransition (paper mode
+        // pushes horizontally, vertical-slide pushes vertically) like iOS does.
+        scrollView.wantsLayer = true
+        context.coordinator.installScrollMonitor()
         return scrollView
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
         coordinator.isDismantled = true
         coordinator.removeKeyMonitor()
+        coordinator.removeScrollMonitor()
         NotificationCenter.default.removeObserver(coordinator)
+    }
+
+    /// Page step snapped to whole lines so a page turn never cuts a line in half.
+    private static func pageStep(font: NSFont, lineSpacing: CGFloat,
+                                 visibleHeight: CGFloat, insetY: CGFloat) -> CGFloat {
+        let lineH = NSLayoutManager().defaultLineHeight(for: font) + lineSpacing
+        guard lineH > 0 else { return max(100, visibleHeight) }
+        let usable = max(lineH, visibleHeight - 2 * insetY)
+        return max(lineH, floor(usable / lineH) * lineH)
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -278,6 +308,28 @@ struct NativeTextView: NSViewRepresentable {
         } else {
             context.coordinator.scrollToProgress(progress)
         }
+
+        // Paging: mode, line-snapped step, and any pending page-turn request from
+        // the SwiftUI tap zones / keyboard handlers in ReaderView. Previously the
+        // mac view ignored pageNavigationDirection entirely and paper mode behaved
+        // exactly like vertical slide (free wheel scrolling, no page turn).
+        context.coordinator.pageEffect = pageEffect
+        // A book page has no scroll bar; vertical-slide keeps the normal scroller.
+        let wantsScroller = pageEffect != .paper
+        if scrollView.hasVerticalScroller != wantsScroller {
+            scrollView.hasVerticalScroller = wantsScroller
+        }
+        let macFont = NSFont(name: macFontName, size: settings.fontSize)
+            ?? NSFont.systemFont(ofSize: settings.fontSize)
+        context.coordinator.pageStep = Self.pageStep(
+            font: macFont, lineSpacing: settings.lineSpacing,
+            visibleHeight: scrollView.contentView.bounds.height,
+            insetY: textView.textContainerInset.height)
+        if pageNavigationDirection != 0,
+           pageNavigationDirection != context.coordinator.lastNavDirection {
+            context.coordinator.navigatePage(direction: pageNavigationDirection)
+        }
+        context.coordinator.lastNavDirection = pageNavigationDirection
 
         // Search: find all matches, highlight active one, scroll to it.
         let queryChanged = context.coordinator.lastSearchQuery != searchQuery
@@ -505,23 +557,98 @@ struct NativeTextView: NSViewRepresentable {
             if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
         }
 
+        // ── Paging (set by updateNSView) ─────────────────────────────────────
+        var pageEffect: PageEffect = .verticalSlide
+        var pageStep: CGFloat = 0            // line-snapped page height
+        var lastNavDirection = 0             // last pageNavigationDirection seen
+        private var scrollMonitor: Any?
+        private var wheelAccumulator: CGFloat = 0
+        private var lastWheelPageAt: CFAbsoluteTime = 0
+
+        /// Paper mode: the scroll wheel / trackpad never free-scrolls. Vertical
+        /// deltas accumulate into page turns; a horizontal two-finger swipe pages
+        /// too (right→left = next). Vertical-slide mode leaves events untouched.
+        func installScrollMonitor() {
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, !self.isDismantled, self.pageEffect == .paper,
+                      let sv = self.scrollView, let window = sv.window, event.window === window
+                else { return event }
+                let loc = sv.convert(event.locationInWindow, from: nil)
+                guard sv.bounds.contains(loc) else { return event }
+
+                // Momentum after the fingers lift: swallow, never page again.
+                if event.momentumPhase != [] { return nil }
+                if event.phase == .began || event.phase == .ended || event.phase == .cancelled {
+                    self.wheelAccumulator = 0
+                    return nil
+                }
+                let dx = event.scrollingDeltaX
+                let dy = event.scrollingDeltaY
+                // Precise (trackpad) deltas are in points; legacy wheels report lines.
+                let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 40 : 1.5
+                let now = CFAbsoluteTimeGetCurrent()
+                guard now - self.lastWheelPageAt > 0.35 else { return nil }
+
+                if abs(dx) > abs(dy) {
+                    self.wheelAccumulator += dx
+                    if abs(self.wheelAccumulator) >= threshold {
+                        // Natural scrolling: content moves with the fingers, so a
+                        // right→left swipe reports a negative deltaX → next page.
+                        self.navigatePage(direction: self.wheelAccumulator < 0 ? 1 : -1)
+                        self.wheelAccumulator = 0
+                        self.lastWheelPageAt = now
+                    }
+                } else {
+                    self.wheelAccumulator += dy
+                    if abs(self.wheelAccumulator) >= threshold {
+                        // Scrolling down (negative deltaY with natural scrolling) → next.
+                        self.navigatePage(direction: self.wheelAccumulator < 0 ? 1 : -1)
+                        self.wheelAccumulator = 0
+                        self.lastWheelPageAt = now
+                    }
+                }
+                return nil
+            }
+        }
+
+        func removeScrollMonitor() {
+            if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
+        }
+
         func navigatePage(direction: Int) {
             guard let sv = scrollView else { return }
-            let pageHeight = sv.contentView.bounds.height
+            let visibleHeight = sv.contentView.bounds.height
+            let step = pageStep > 0 ? pageStep : visibleHeight
             let contentHeight = sv.documentView?.frame.height ?? 0
-            let scrollable = contentHeight - pageHeight
+            let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let current = sv.contentView.bounds.origin.y
-            let target = max(0, min(current + CGFloat(direction) * pageHeight, scrollable))
+            let target = max(0, min(current + CGFloat(direction) * step, scrollable))
             guard abs(target - current) > 1 else { return }
+
+            // Same visual as iOS: set the offset instantly and let a CATransition
+            // supply the motion — paper mode pushes sideways like a page turn,
+            // vertical-slide pushes up/down.
+            let transition = CATransition()
+            transition.duration = 0.35
+            transition.type = .push
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            switch pageEffect {
+            case .paper:         transition.subtype = direction > 0 ? .fromRight : .fromLeft
+            case .verticalSlide: transition.subtype = direction > 0 ? .fromTop : .fromBottom
+            }
             isScrollingProgrammatically = true
+            CATransaction.begin()
+            (sv.contentView.layer ?? sv.layer)?.add(transition, forKey: "pageTurn")
             sv.contentView.scroll(to: NSPoint(x: 0, y: target))
             sv.reflectScrolledClipView(sv.contentView)
+            CATransaction.commit()
             isScrollingProgrammatically = false
-            let capturedScrollable = scrollable
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.isDismantled else { return }
-                self.eventChannel?.scrollProgress = target / capturedScrollable
+                guard let self, !self.isDismantled,
+                      let tv = self.scrollView?.documentView as? NSTextView,
+                      let p = self.charProgress(tv) else { return }
+                self.eventChannel?.scrollProgress = p
             }
         }
 
@@ -571,20 +698,13 @@ struct NativeTextView: NSViewRepresentable {
                 } else { isRestoring = false }
                 return
             }
-            // Proportional scroll — avoids ensureLayout(forCharacterRange:) which
-            // synchronously lays out the full document up to the target character,
-            // freezing the UI for seconds when deep into a large book.
-            let contentHeight = textView.frame.height
-            let visibleHeight = sv.contentView.bounds.height
-            let maxY = max(0, contentHeight - visibleHeight)
-            let scrollY = min(contentHeight * target, maxY)
-            isScrollingProgrammatically = true
-            sv.contentView.scroll(to: NSPoint(x: 0, y: scrollY))
-            sv.reflectScrolledClipView(sv.contentView)
-            isScrollingProgrammatically = false
+            // Character-based, like iOS: the saved progress is charIndex / length,
+            // so land on that character's line rather than on a pixel ratio.
+            let length = textView.textStorage?.length ?? 0
+            let landed = scroll(toCharacter: Int(target * Double(length)), in: sv)
 
-            // If offset didn't stick (layout not ready yet), retry.
-            if target > 0.001, sv.contentView.bounds.origin.y < 1, retries > 0 {
+            // Layout not ready yet (no frame / no glyphs): retry shortly.
+            if !landed, retries > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak sv] in
                     guard let self, let sv else { return }
                     self.performRestore(target, in: sv, token: token, retries: retries - 1)
@@ -595,35 +715,81 @@ struct NativeTextView: NSViewRepresentable {
         }
 
         func scrollToProgress(_ target: Double) {
-            guard let sv = scrollView else { return }
+            guard let sv = scrollView, let tv = sv.documentView as? NSTextView else { return }
             // If a content-change restore is in flight, don't fight it.
             guard !isRestoring else { return }
-
-            let contentHeight = sv.documentView?.frame.height ?? 0
-            let visibleHeight = sv.contentView.bounds.height
-            let s = contentHeight - visibleHeight
-            guard s > 0 else { return }
-
-            let targetOffset = target * s
-            let currentOffset = sv.contentView.bounds.origin.y
-            guard abs(targetOffset - currentOffset) > 1 else { return }
-
-            isScrollingProgrammatically = true
-            autoreleasepool {
-                sv.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
-                sv.reflectScrolledClipView(sv.contentView)
-            }
-            isScrollingProgrammatically = false
+            let length = tv.textStorage?.length ?? 0
+            guard length > 0 else { return }
+            // Already there (the value we just reported coming back) → no-op.
+            if let current = charProgress(tv), abs(current - target) < 0.5 / Double(length) { return }
+            _ = scroll(toCharacter: Int(target * Double(length)), in: sv)
         }
 
         @objc func didLiveScroll(_ notification: Notification) {
-            guard !isDismantled, let sv = scrollView else { return }
-            let contentHeight = sv.documentView?.frame.height ?? 0
-            let visibleHeight = sv.contentView.bounds.height
-            let scrollable = contentHeight - visibleHeight
-            guard scrollable > 0 else { return }
-            let offset = sv.contentView.bounds.origin.y
-            eventChannel?.scrollProgress = max(0, min(offset / scrollable, 1))
+            guard !isDismantled, let sv = scrollView,
+                  let tv = sv.documentView as? NSTextView,
+                  let p = charProgress(tv) else { return }
+            eventChannel?.scrollProgress = p
+        }
+
+        // ── Character-based position (mirrors the iOS coordinator) ───────────
+
+        /// Character index of the first glyph in the visible area.
+        func charIndexAtTop(_ tv: NSTextView) -> Int? {
+            guard let lm = tv.layoutManager, let tc = tv.textContainer, let sv = scrollView,
+                  tv.textStorage?.length ?? 0 > 0 else { return nil }
+            let y = max(0, sv.contentView.bounds.origin.y - tv.textContainerInset.height)
+            let rect = CGRect(x: 0, y: y, width: tc.size.width,
+                              height: max(1, sv.contentView.bounds.height))
+            let gr = lm.glyphRange(forBoundingRect: rect, in: tc)
+            guard gr.location != NSNotFound, gr.length > 0 else { return nil }
+            return lm.characterIndexForGlyph(at: gr.location)
+        }
+
+        func charProgress(_ tv: NSTextView) -> Double? {
+            guard let idx = charIndexAtTop(tv), let len = tv.textStorage?.length, len > 0 else { return nil }
+            return min(max(Double(idx) / Double(len), 0), 1)
+        }
+
+        /// Exact y of the line containing `idx` — the same probe iOS's landingLoop
+        /// uses. ensureLayout(forCharacterRange:) is O(local) with non-contiguous
+        /// layout (the old "lays out the whole document" belief was font-attribute
+        /// fixing in disguise; see FontRegistrar.effectiveFontName).
+        private func yForCharacter(_ idx: Int, in tv: NSTextView) -> CGFloat? {
+            guard let lm = tv.layoutManager, let len = tv.textStorage?.length, len > 0 else { return nil }
+            let safe = min(max(0, idx), len - 1)
+            let range = NSRange(location: safe, length: 1)
+            lm.ensureLayout(forCharacterRange: range)
+            let gr = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            guard gr.location != NSNotFound, gr.location < lm.numberOfGlyphs else { return nil }
+            let line = lm.lineFragmentRect(forGlyphAt: gr.location, effectiveRange: nil,
+                                           withoutAdditionalLayout: true)
+            guard line.minY.isFinite, line.height > 0 else { return nil }
+            return line.minY + tv.textContainerInset.height
+        }
+
+        /// Scrolls so the line containing `idx` sits at the top, verifying once and
+        /// re-probing if the first landing is off (layout established by the probe
+        /// can shift the frame). Returns false when layout isn't ready yet.
+        @discardableResult
+        func scroll(toCharacter idx: Int, in sv: NSScrollView) -> Bool {
+            guard let tv = sv.documentView as? NSTextView,
+                  sv.contentView.bounds.height > 0 else { return false }
+            for _ in 0..<3 {
+                guard let y = yForCharacter(idx, in: tv) else { return false }
+                // Let the text view grow to the layout the probe just established
+                // before clamping, or the target clamps to a stale document end.
+                tv.sizeToFit()
+                let maxY = max(0, tv.frame.height - sv.contentView.bounds.height)
+                let target = min(max(0, y), maxY)
+                isScrollingProgrammatically = true
+                sv.contentView.scroll(to: NSPoint(x: 0, y: target))
+                sv.reflectScrolledClipView(sv.contentView)
+                isScrollingProgrammatically = false
+                guard let landed = charIndexAtTop(tv) else { return false }
+                if abs(landed - idx) <= 300 || target >= maxY || target <= 0 { break }
+            }
+            return true
         }
 
         @objc func handleTap(_ recognizer: NSGestureRecognizer) { eventChannel?.tapCount += 1 }
@@ -754,6 +920,8 @@ struct NativeTextView: UIViewRepresentable {
         // blocked, while isScrollEnabled stays true so UITextView lays out content.
         textView.panGestureRecognizer.isEnabled = pageEffect != .paper
         textView.alwaysBounceVertical = pageEffect != .paper
+        // A book page has no scroll bar.
+        textView.showsVerticalScrollIndicator = pageEffect != .paper
 
         // Two-tier change detection:
         // • layout changed (text, font, size, spacing) → applyContent + scheduleRestore

@@ -74,8 +74,11 @@ listings follow pagination cursors).
   `isSelectable = false` normally (tap = paging); true only in highlight mode.
 - **Progress is character-based**, not pixel-based: `charProgress` =
   characterIndex-at-top / textStorage.length. Pixel offsets are unreliable
-  because TextKit only *estimates* content height until laid out. (The macOS
-  path still uses pixel offsets — known gap.)
+  because TextKit only *estimates* content height until laid out. Both
+  platforms: the macOS view also opts into TextKit 1 + non-contiguous layout
+  (`textView.layoutManager?.allowsNonContiguousLayout = true`) and lands on
+  the target character's line via the same ensureLayout(forCharacterRange:)
+  probe. Paper mode on macOS swallows wheel/trackpad events and pages.
 - **One index space.** `ReaderViewModel.plainText` is index-for-index identical
   to the text view's `NSTextStorage`: `EPUBParser` emits `text + "\n\n"` per
   text block and `EPUBParser.imagePlaceholder` (U+FFFC + "\n\n") per image,
