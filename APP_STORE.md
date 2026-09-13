@@ -15,7 +15,7 @@ Alternatives:
 - EPUB, PDF & text with voice
 
 ## Promotional Text (170 char max — editable anytime)
-Bring your own books. Read EPUB, PDF, TXT and Markdown with custom fonts, themes, and natural text‑to‑speech — plus bookmarks, highlights, and import from Dropbox, Google Drive or OneDrive.
+Bring your own books. Read EPUB, PDF, TXT and Markdown with your fonts and themes, listen with natural text‑to‑speech, and import from Dropbox, Google Drive or OneDrive.
 
 ---
 
