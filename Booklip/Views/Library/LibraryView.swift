@@ -29,12 +29,14 @@ struct LibraryView: View {
                 if selectedTab == .all {
                     AllBooksView(showingFilePicker: $showingFilePicker, searchText: $searchText)
                 } else {
-                    FoldersView(showingFilePicker: $showingFilePicker)
+                    FoldersView(showingFilePicker: $showingFilePicker, searchText: $searchText)
                 }
             }
             .safeAreaInset(edge: .bottom) {
                 if library.isSelecting {
-                    SelectionBar(visible: selectedTab == .all ? library.filteredBooks(search: searchText) : [])
+                    // Folders tab lists books only while searching (the matches).
+                    SelectionBar(visible: selectedTab == .all || !searchText.isEmpty
+                                 ? library.filteredBooks(search: searchText) : [])
                 }
             }
             .navigationTitle("Library")
@@ -311,25 +313,43 @@ private struct AllBooksView: View {
 private struct FoldersView: View {
     @EnvironmentObject private var library: LibraryViewModel
     @Binding var showingFilePicker: Bool
+    @Binding var searchText: String
     @State private var folderToRename: BookFolder?
     @State private var renameText = ""
+
+    private var isSearching: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
+    // While searching: folders whose name matches or that hold a match, the
+    // Unfiled entry if it holds a match, then every matching book itself so a
+    // hit is one tap away without opening each folder.
+    private var visibleFolders: [BookFolder] { library.filteredFolders(search: searchText) }
+    private var visibleUnfiled: [Book] { library.filter(library.unfolderedBooks, search: searchText) }
+    private var matchingBooks: [Book] { isSearching ? library.filteredBooks(search: searchText) : [] }
 
     var body: some View {
         ScrollView {
             if let minWidth = library.viewMode.minCellWidth {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: minWidth), spacing: 16)], spacing: 16) {
                     folderItems(asRow: false)
+                    ForEach(matchingBooks) { BookCardLink(book: $0).dragSelectItem($0.id) }
                 }
                 .padding()
             } else {
                 LazyVStack(spacing: 8) {
                     folderItems(asRow: true)
+                    ForEach(matchingBooks) { BookCardLink(book: $0).dragSelectItem($0.id) }
                 }
                 .padding()
             }
         }
+        .dragSelection(enabled: library.isSelecting,
+                       isSelected: { (id: UUID) in library.selectedBookIDs.contains(id) },
+                       setSelected: { (id: UUID, on: Bool) in library.setSelected(id, on) })
         .overlay {
-            if library.folders.isEmpty && library.unfolderedBooks.isEmpty {
+            if isSearching {
+                if visibleFolders.isEmpty && matchingBooks.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+            } else if library.folders.isEmpty && library.unfolderedBooks.isEmpty {
                 ContentUnavailableView("No Folders", systemImage: "folder",
                     description: Text("Tap the folder+ button to create one."))
             }
@@ -351,12 +371,14 @@ private struct FoldersView: View {
 
     @ViewBuilder
     private func folderItems(asRow: Bool) -> some View {
-        ForEach(library.folders) { folder in
+        ForEach(visibleFolders) { folder in
+            // Counts reflect the query while searching ("2 books" = 2 matches).
+            let count = library.filter(library.books(in: folder), search: searchText).count
             NavigationLink(destination: FolderDetailView(folder: folder)) {
                 if asRow {
-                    FolderRow(name: folder.name, count: library.books(in: folder).count, icon: "folder.fill")
+                    FolderRow(name: folder.name, count: count, icon: "folder.fill")
                 } else {
-                    FolderCard(folder: folder, count: library.books(in: folder).count)
+                    FolderCard(folder: folder, count: count)
                 }
             }
             .buttonStyle(.plain)
@@ -370,13 +392,13 @@ private struct FoldersView: View {
             }
         }
 
-        if !library.unfolderedBooks.isEmpty {
+        if !visibleUnfiled.isEmpty {
             NavigationLink(destination: UnfiledBooksView()) {
                 if asRow {
-                    FolderRow(name: "Unfiled", count: library.unfolderedBooks.count, icon: "tray")
+                    FolderRow(name: "Unfiled", count: visibleUnfiled.count, icon: "tray")
                 } else {
                     FolderCard(folder: BookFolder(name: "Unfiled"),
-                               count: library.unfolderedBooks.count, systemIcon: "tray")
+                               count: visibleUnfiled.count, systemIcon: "tray")
                 }
             }
             .buttonStyle(.plain)
@@ -389,27 +411,45 @@ private struct FoldersView: View {
 struct FolderDetailView: View {
     @EnvironmentObject private var library: LibraryViewModel
     let folder: BookFolder
+    @State private var query = ""
+
+    private var books: [Book] { library.filter(library.books(in: folder), search: query) }
 
     var body: some View {
         Group {
             if library.books(in: folder).isEmpty {
                 ContentUnavailableView("No Books", systemImage: "folder",
                     description: Text("Select books and choose Move to put them here."))
+            } else if books.isEmpty {
+                ContentUnavailableView.search(text: query)
             } else {
-                BooksCollection(books: library.books(in: folder))
+                BooksCollection(books: books)
             }
         }
         .navigationTitle(folder.name)
-        .bookSelection(books: library.books(in: folder))
+        // The library's search bar belongs to the root; a pushed folder gets its own.
+        .searchable(text: $query, prompt: "Search in \(folder.name)")
+        .bookSelection(books: books)
     }
 }
 
 struct UnfiledBooksView: View {
     @EnvironmentObject private var library: LibraryViewModel
+    @State private var query = ""
+
+    private var books: [Book] { library.filter(library.unfolderedBooks, search: query) }
+
     var body: some View {
-        BooksCollection(books: library.unfolderedBooks)
-            .navigationTitle("Unfiled")
-            .bookSelection(books: library.unfolderedBooks)
+        Group {
+            if books.isEmpty {
+                ContentUnavailableView.search(text: query)
+            } else {
+                BooksCollection(books: books)
+            }
+        }
+        .navigationTitle("Unfiled")
+        .searchable(text: $query, prompt: "Search in Unfiled")
+        .bookSelection(books: books)
     }
 }
 

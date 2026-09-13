@@ -82,11 +82,26 @@ class LibraryViewModel: ObservableObject {
 
     /// Books shown on the All Books tab for a search string.
     func filteredBooks(search: String) -> [Book] {
-        let base = sorted(books)
-        guard !search.isEmpty else { return base }
-        return base.filter {
-            $0.title.localizedCaseInsensitiveContains(search) ||
-            $0.author.localizedCaseInsensitiveContains(search)
+        filter(sorted(books), search: search)
+    }
+
+    /// Title/author match; an empty query keeps everything.
+    func filter(_ list: [Book], search: String) -> [Book] {
+        let q = search.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return list }
+        return list.filter {
+            $0.title.localizedCaseInsensitiveContains(q) ||
+            $0.author.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    /// Folders to show for a query: name matches, or the folder holds a
+    /// matching book.
+    func filteredFolders(search: String) -> [BookFolder] {
+        let q = search.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return folders }
+        return folders.filter { f in
+            f.name.localizedCaseInsensitiveContains(q) || !filter(books(in: f), search: q).isEmpty
         }
     }
 
