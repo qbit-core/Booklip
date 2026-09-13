@@ -15,7 +15,7 @@ Alternatives:
 - EPUB, PDF & text with voice
 
 ## Promotional Text (170 char max — editable anytime)
-Bring your own books. Read EPUB, PDF, TXT and Markdown with custom fonts, themes, and natural text‑to‑speech — plus bookmarks, highlights, and cloud import.
+Bring your own books. Read EPUB, PDF, TXT and Markdown with custom fonts, themes, and natural text‑to‑speech — plus bookmarks, highlights, and import from Dropbox, Google Drive or OneDrive.
 
 ---
 
@@ -39,7 +39,7 @@ Jump around with the table of contents, drop bookmarks, and highlight passages i
 Sort and group your books into folders, switch between grid and list layouts, and select multiple books to move or delete at once. See real EPUB covers at a glance.
 
 **Bring books from the cloud**
-Connect Dropbox or Google Drive and import files directly — browse your folders, pick what you want, and read offline.
+Connect Dropbox, Google Drive, or OneDrive and import files directly — browse your folders, pick what you want, and read offline. Access is read‑only, so nothing in your cloud is ever changed or deleted. You can also paste a direct download link to pull in a single file.
 
 **Track your habit**
 See total time read, your day streak, and how many books you're reading or have finished.
@@ -49,11 +49,13 @@ Everything stays on your device. No account required. No ads.
 ---
 
 ## Keywords (100 char max, comma‑separated)
-epub,reader,ebook,pdf,txt,book,tts,text to speech,read aloud,bookmark,highlight,korean,dropbox
+epub,reader,ebook,pdf,txt,tts,text to speech,read aloud,bookmark,highlight,korean,dropbox,onedrive
 
 ---
 
 ## What's New (for updates)
+- Import from OneDrive — Dropbox, Google Drive and OneDrive are all supported
+- Import a book straight from a direct download link
 - Read EPUB books with their original embedded fonts
 - Bookmarks, highlights, and a table of contents
 - Auto‑scroll and a text‑to‑speech sleep timer
@@ -65,5 +67,5 @@ epub,reader,ebook,pdf,txt,book,tts,text to speech,read aloud,bookmark,highlight,
 ## Support / Privacy notes for App Review
 - **Data collection:** None. All books, settings, bookmarks, highlights, and progress are stored locally on device.
 - **Account:** Not required.
-- **Cloud (optional):** Dropbox / Google Drive are used only to let the user browse and download their own files via OAuth. The app requests read‑only access and stores tokens locally.
+- **Cloud (optional):** Dropbox / Google Drive / OneDrive are used only to let the user browse and download their own files via OAuth. The app requests read‑only access and stores tokens locally.
 - **Network use:** Only when the user connects a cloud service or uses online voices.
