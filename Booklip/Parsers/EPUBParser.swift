@@ -13,29 +13,33 @@ struct EPUBParser: BookParser, Sendable {
     // multiple threads concurrently. Compiling these once (instead of inside
     // stripHTML, called per HTML chunk per chapter) removes most of the
     // per-call overhead that made a 300+ chapter EPUB take ~38s to parse.
-    private static let reScript = try! NSRegularExpression(
+    // `nonisolated`: the project's default actor isolation is MainActor, which
+    // would make these statics main-actor-only; they are read from the
+    // nonisolated parser on background threads. NSRegularExpression is Sendable,
+    // so a plain nonisolated constant is enough.
+    nonisolated private static let reScript = try! NSRegularExpression(
         pattern: #"<script[^>]*>[\s\S]*?</script>"#, options: .caseInsensitive)
-    private static let reStyle = try! NSRegularExpression(
+    nonisolated private static let reStyle = try! NSRegularExpression(
         pattern: #"<style[^>]*>[\s\S]*?</style>"#, options: .caseInsensitive)
     // <head> (and a stray <title> outside it) carry no body text; without this the
     // document title was prepended to every chapter's text.
-    private static let reHead = try! NSRegularExpression(
+    nonisolated private static let reHead = try! NSRegularExpression(
         pattern: #"<head[^>]*>[\s\S]*?</head>"#, options: .caseInsensitive)
-    private static let reTitle = try! NSRegularExpression(
+    nonisolated private static let reTitle = try! NSRegularExpression(
         pattern: #"<title[^>]*>[\s\S]*?</title>"#, options: .caseInsensitive)
-    private static let reBlock = try! NSRegularExpression(
+    nonisolated private static let reBlock = try! NSRegularExpression(
         pattern: #"</?(p|div|br|h[1-6]|li|tr)[^>]*>"#, options: .caseInsensitive)
-    private static let reTags = try! NSRegularExpression(pattern: #"<[^>]+>"#)
+    nonisolated private static let reTags = try! NSRegularExpression(pattern: #"<[^>]+>"#)
     /// What one image block occupies in plainText — must match what the text
     /// view inserts for an `.image` block (NSTextAttachment = U+FFFC, then "\n\n").
-    static let imagePlaceholder = "\u{FFFC}\n\n"
-    private static let reBlankLines = try! NSRegularExpression(pattern: #"\n{3,}"#)
-    private static let reNumEntity = try! NSRegularExpression(
+    nonisolated static let imagePlaceholder = "\u{FFFC}\n\n"
+    nonisolated private static let reBlankLines = try! NSRegularExpression(pattern: #"\n{3,}"#)
+    nonisolated private static let reNumEntity = try! NSRegularExpression(
         pattern: #"&#(x[0-9a-fA-F]+|\d+);"#, options: .caseInsensitive)
-    private static let reImgTag = try! NSRegularExpression(
+    nonisolated private static let reImgTag = try! NSRegularExpression(
         pattern: #"<(?:img|image)\b[^>]*?(?:src|xlink:href)\s*=\s*["']([^"']+)["'][^>]*>"#,
         options: [.caseInsensitive, .dotMatchesLineSeparators])
-    private static let reHeading = try! NSRegularExpression(
+    nonisolated private static let reHeading = try! NSRegularExpression(
         pattern: #"<h[1-3][^>]*>([\s\S]*?)</h[1-3]>"#, options: .caseInsensitive)
 
     nonisolated func parse(url: URL) throws -> ParsedBook {
@@ -169,8 +173,13 @@ struct EPUBParser: BookParser, Sendable {
         var strippedResults = [String](repeating: "", count: works.count)
         if !works.isEmpty {
             strippedResults.withUnsafeMutableBufferPointer { buf in
+                // Each iteration writes exactly one distinct index, so there is no
+                // data race; the raw base pointer is handed to the @Sendable closure
+                // via nonisolated(unsafe) instead of capturing the non-Sendable
+                // UnsafeMutableBufferPointer itself.
+                nonisolated(unsafe) let base = buf.baseAddress!
                 DispatchQueue.concurrentPerform(iterations: works.count) { i in
-                    buf[i] = stripHTML(works[i].text)
+                    base[i] = stripHTML(works[i].text)
                 }
             }
         }
