@@ -27,6 +27,44 @@ private actor SearchActor {
 }
 private let sharedSearchActor = SearchActor()
 
+/// How many matches on either side of the active one get painted. A common
+/// token in a multi-MB book yields tens of thousands of matches; painting all
+/// of them (and clearing the WHOLE storage first) froze the reader for seconds
+/// on every search and every next/prev tap. Only a window around the active
+/// match is ever visible anyway.
+private let searchPaintWindow = 150
+
+/// Repaints search-match backgrounds incrementally: clears only the ranges
+/// painted last time (repainting user highlights underneath), then paints a
+/// window of matches around the active one, all inside one editing batch.
+/// Returns the active match so the caller can scroll to it. Shared by the
+/// iOS and macOS text views.
+private func repaintSearchMatches(in storage: NSTextStorage,
+                                  matches: [NSRange], index: Int,
+                                  painted: inout [NSRange],
+                                  dim: Any, bright: Any,
+                                  reapplyUserHighlights: (NSTextStorage, NSRange) -> Void) -> NSRange? {
+    storage.beginEditing()
+    for r in painted where NSMaxRange(r) <= storage.length {
+        storage.removeAttribute(.backgroundColor, range: r)
+        reapplyUserHighlights(storage, r)
+    }
+    painted.removeAll()
+    guard !matches.isEmpty else { storage.endEditing(); return nil }
+    let activeIdx = ((index % matches.count) + matches.count) % matches.count
+    let lo = max(0, activeIdx - searchPaintWindow)
+    let hi = min(matches.count - 1, activeIdx + searchPaintWindow)
+    painted.reserveCapacity(hi - lo + 1)
+    for i in lo...hi {
+        let m = matches[i]
+        guard NSMaxRange(m) <= storage.length else { continue }
+        storage.addAttribute(.backgroundColor, value: i == activeIdx ? bright : dim, range: m)
+        painted.append(m)
+    }
+    storage.endEditing()
+    return matches[activeIdx]
+}
+
 struct TextReaderView: View {
     @ObservedObject var vm: ReaderViewModel
     @ObservedObject var settings: ReadingSettings
@@ -271,20 +309,13 @@ struct NativeTextView: NSViewRepresentable {
     private func applySearchHighlight(to textView: NSTextView, matches: [NSRange], index: Int,
                                       coordinator: Coordinator) {
         guard let storage = textView.textStorage else { return }
-        let full = NSRange(location: 0, length: storage.length)
-        storage.removeAttribute(.backgroundColor, range: full)
-        // Repaint saved highlights before layering search on top — otherwise a search
-        // (including one with zero matches) erases them.
-        coordinator.reapplyUserHighlights(in: storage, over: full)
-        guard !matches.isEmpty else { return }
-        let active = matches[index % matches.count]
-        // Dim all matches, brighten the active one.
-        for m in matches {
-            storage.addAttribute(.backgroundColor,
-                                 value: NSColor.systemYellow.withAlphaComponent(0.3), range: m)
-        }
-        storage.addAttribute(.backgroundColor,
-                             value: NSColor.systemYellow.withAlphaComponent(0.75), range: active)
+        let active = repaintSearchMatches(
+            in: storage, matches: matches, index: index,
+            painted: &coordinator.paintedSearchRanges,
+            dim: NSColor.systemYellow.withAlphaComponent(0.3),
+            bright: NSColor.systemYellow.withAlphaComponent(0.75)
+        ) { storage, range in coordinator.reapplyUserHighlights(in: storage, over: range) }
+        guard let active else { return }
         textView.scrollRangeToVisible(active)
     }
 
@@ -431,6 +462,7 @@ struct NativeTextView: NSViewRepresentable {
         var lastSearchQuery = ""
         var lastSearchResultIndex = 0
         var searchMatches: [NSRange] = []
+        var paintedSearchRanges: [NSRange] = []   // what the last repaint painted
         var userHighlights: [Highlight] = []
         private var keyMonitor: Any?
 
@@ -824,22 +856,25 @@ struct NativeTextView: UIViewRepresentable {
                                          index: Int,
                                          coordinator: Coordinator) {
         let storage = textView.textStorage
-        let full = NSRange(location: 0, length: storage.length)
-        storage.removeAttribute(.backgroundColor, range: full)
-        // Repaint saved highlights before layering search on top — otherwise a search
-        // (including one with zero matches) erases them.
-        coordinator.reapplyUserHighlights(in: storage, over: full)
-        guard !matches.isEmpty else { return }
-        let active = matches[index % matches.count]
-        for m in matches {
-            storage.addAttribute(.backgroundColor,
-                                 value: UIColor.systemYellow.withAlphaComponent(0.3), range: m)
-        }
-        storage.addAttribute(.backgroundColor,
-                             value: UIColor.systemYellow.withAlphaComponent(0.75), range: active)
+        let _t0 = CFAbsoluteTimeGetCurrent()
+        let active = repaintSearchMatches(
+            in: storage, matches: matches, index: index,
+            painted: &coordinator.paintedSearchRanges,
+            dim: UIColor.systemYellow.withAlphaComponent(0.3),
+            bright: UIColor.systemYellow.withAlphaComponent(0.75)
+        ) { storage, range in coordinator.reapplyUserHighlights(in: storage, over: range) }
+        print(String(format: "[TIME] searchRepaint %.0f ms  painted=%d of %d",
+                     (CFAbsoluteTimeGetCurrent() - _t0) * 1000,
+                     coordinator.paintedSearchRanges.count, matches.count))
+        guard let active else { return }
         coordinator.isScrollingProgrammatically = true
         textView.scrollRangeToVisible(active)
         coordinator.isScrollingProgrammatically = false
+        // A search jump bypasses landingLoop, so rebase the page counter here or
+        // the "Page X / Y" label keeps the pre-search page.
+        let total = stableCharCount > 0 ? stableCharCount : storage.length
+        let vmRef = vm
+        Task { @MainActor in vmRef.rebasePage(atCharIdx: active.location, totalChars: total) }
     }
 
     // Apply only color/theme changes without touching text content or glyph layout.
@@ -1218,6 +1253,7 @@ struct NativeTextView: UIViewRepresentable {
         var lastSearchQuery = ""
         var lastSearchResultIndex = 0
         var searchMatches: [NSRange] = []
+        var paintedSearchRanges: [NSRange] = []   // what the last repaint painted
         var currentSearchTask: Task<Void, Never>?
         var currentPlainTextBuildTask: Task<Void, Never>?
 
