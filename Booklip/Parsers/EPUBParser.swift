@@ -30,6 +30,11 @@ struct EPUBParser: BookParser, Sendable {
     nonisolated private static let reBlock = try! NSRegularExpression(
         pattern: #"</?(p|div|br|h[1-6]|li|tr)[^>]*>"#, options: .caseInsensitive)
     nonisolated private static let reTags = try! NSRegularExpression(pattern: #"<[^>]+>"#)
+    // HTML whitespace collapsing: runs of source whitespace (including the line
+    // wrapping inside <p> that Gutenberg-style files carry) are a single space.
+    // Real line breaks come only from block elements / <br> via reBlock.
+    nonisolated private static let reSourceWS = try! NSRegularExpression(pattern: #"[ \t\r\n]+"#)
+    nonisolated private static let reLineEdgeWS = try! NSRegularExpression(pattern: #"[ \t]*\n[ \t]*"#)
     /// What one image block occupies in plainText — must match what the text
     /// view inserts for an `.image` block (NSTextAttachment = U+FFFC, then "\n\n").
     nonisolated static let imagePlaceholder = "\u{FFFC}\n\n"
@@ -108,7 +113,24 @@ struct EPUBParser: BookParser, Sendable {
             enum Kind { case text(String); case imageSrc(String) }
             let kind: Kind
             var stripped: String = ""
+            /// TOC fragment id whose target element starts this segment (see
+            /// splitHTML): its offset is the running offset when the segment begins.
+            var anchorID: String? = nil
         }
+        // The TOC is parsed up front so that entries pointing INTO a file
+        // ("chapter.xhtml#ch3") can be split out as their own segments — every
+        // chapter of a single-file EPUB otherwise mapped to offset 0.
+        let tocEntries = parseTOC(opf: opf, base: opfBase, archive: archive, index: entryIndex) ?? []
+        var anchorsByFile: [String: [String]] = [:]
+        for entry in tocEntries {
+            let comps = entry.href.components(separatedBy: "#")
+            guard comps.count > 1, !comps[1].isEmpty else { continue }
+            let file = comps[0].removingPercentEncoding ?? comps[0]
+            let key = (file as NSString).lastPathComponent
+            let frag = comps[1].removingPercentEncoding ?? comps[1]
+            anchorsByFile[key, default: []].append(frag)
+        }
+        var anchorToOffset: [String: Int] = [:]   // "file#fragment" → start offset
         struct ChapterRaw {
             let hrefKey: String
             let chapterDir: String
@@ -136,15 +158,22 @@ struct EPUBParser: BookParser, Sendable {
                 ?? (decodedHref as NSString).lastPathComponent
                     .replacingOccurrences(of: ".xhtml", with: "")
                     .replacingOccurrences(of: ".html", with: "")
+            let hrefKey = (decodedHref as NSString).lastPathComponent
             var segs: [RawSegment] = []
-            for segment in segments(of: html) {
-                switch segment {
-                case .html(let chunk):   segs.append(RawSegment(kind: .text(chunk)))
-                case .imageSrc(let src): segs.append(RawSegment(kind: .imageSrc(src)))
+            for piece in splitHTML(html, atAnchors: anchorsByFile[hrefKey] ?? []) {
+                var first = true
+                for segment in segments(of: piece.html) {
+                    var seg: RawSegment
+                    switch segment {
+                    case .html(let chunk):   seg = RawSegment(kind: .text(chunk))
+                    case .imageSrc(let src): seg = RawSegment(kind: .imageSrc(src))
+                    }
+                    if first { seg.anchorID = piece.anchorID; first = false }
+                    segs.append(seg)
                 }
             }
             chapterRaws.append(ChapterRaw(
-                hrefKey: (decodedHref as NSString).lastPathComponent,
+                hrefKey: hrefKey,
                 chapterDir: chapterDir,
                 titleHint: titleHint.isEmpty ? nil : titleHint,
                 segments: segs))
@@ -225,6 +254,9 @@ struct EPUBParser: BookParser, Sendable {
             chapterMarks.append((chapterTitle, startOffset))
 
             for seg in ch.segments {
+                if let anchor = seg.anchorID {
+                    anchorToOffset[ch.hrefKey + "#" + anchor] = runningOffset
+                }
                 switch seg.kind {
                 case .text:
                     if !seg.stripped.isEmpty {
@@ -261,11 +293,18 @@ struct EPUBParser: BookParser, Sendable {
         // entry's target file to the spine offset we recorded. Fall back to
         // per-spine headings.
         var chapters: [Chapter] = []
-        if let tocEntries = parseTOC(opf: opf, base: opfBase, archive: archive, index: entryIndex), !tocEntries.isEmpty {
+        if !tocEntries.isEmpty {
             chapters = tocEntries.compactMap { entry in
-                let file = (entry.href.components(separatedBy: "#").first ?? entry.href as String)
+                let comps = entry.href.components(separatedBy: "#")
+                let file = comps.first ?? entry.href
                 let key = ((file.removingPercentEncoding ?? file) as NSString).lastPathComponent
-                guard let offset = hrefToOffset[key] else { return nil }
+                // Fragment target when we could split on it, else the file start.
+                var resolved: Int? = nil
+                if comps.count > 1 {
+                    let frag = comps[1].removingPercentEncoding ?? comps[1]
+                    resolved = anchorToOffset[key + "#" + frag]
+                }
+                guard let offset = resolved ?? hrefToOffset[key] else { return nil }
                 return Chapter(title: entry.title,
                                progress: Double(offset) / Double(totalLen),
                                level: entry.level)
@@ -539,6 +578,80 @@ struct EPUBParser: BookParser, Sendable {
         return result.isEmpty ? [.html(html)] : result
     }
 
+    // Elements a TOC fragment may split a chapter on. Splitting inserts a block
+    // boundary ("\n\n") at the cut, which is what these tags produce anyway; an
+    // inline anchor (<a id>, <span id>) mid-paragraph must not be cut.
+    nonisolated private static let splittableTags: Set<String> = [
+        "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "aside",
+        "li", "table", "tr", "blockquote", "figure", "header", "hgroup", "nav",
+        "ol", "ul", "dl", "dt", "dd", "pre", "hr", "body"
+    ]
+
+    /// Cuts `html` in front of the block element carrying each fragment id so the
+    /// element starts its own segment. Pieces come back in document order; the
+    /// first carries no id. Ids that cannot be located (or sit on an inline
+    /// element with no block tag directly before it) are simply not cut.
+    nonisolated private func splitHTML(_ html: String, atAnchors ids: [String]) -> [(anchorID: String?, html: String)] {
+        guard !ids.isEmpty else { return [(nil, html)] }
+        let ns = html as NSString
+        var cuts: [(loc: Int, id: String)] = []
+        for id in ids {
+            if let loc = anchorTagLocation(of: id, in: ns) { cuts.append((loc, id)) }
+        }
+        guard !cuts.isEmpty else { return [(nil, html)] }
+        cuts.sort { $0.loc < $1.loc }
+        var pieces: [(anchorID: String?, html: String)] = []
+        var cursor = 0
+        var currentID: String? = nil
+        for cut in cuts {
+            // An empty piece is kept on purpose: two ids on the same element must
+            // both resolve to that element's offset.
+            pieces.append((currentID, ns.substring(with: NSRange(location: cursor, length: max(0, cut.loc - cursor)))))
+            cursor = max(cursor, cut.loc)
+            currentID = cut.id
+        }
+        pieces.append((currentID, ns.substring(from: cursor)))
+        return pieces
+    }
+
+    /// Location of the "<" opening the block element that carries `id`, or nil.
+    nonisolated private func anchorTagLocation(of id: String, in ns: NSString) -> Int? {
+        var attr = ns.range(of: "id=\"\(id)\"")
+        if attr.location == NSNotFound { attr = ns.range(of: "id='\(id)'") }
+        guard attr.location != NSNotFound, attr.location > 0 else { return nil }
+        // Must be the `id` attribute itself, not the tail of e.g. `data-id=`.
+        let before = ns.character(at: attr.location - 1)
+        guard before == 0x20 || before == 0x09 || before == 0x0A || before == 0x0D else { return nil }
+        let open = ns.range(of: "<", options: .backwards, range: NSRange(location: 0, length: attr.location))
+        guard open.location != NSNotFound else { return nil }
+        if Self.splittableTags.contains(tagName(at: open.location, in: ns)) { return open.location }
+        // Inline anchor: accept it when a block open tag sits directly before it
+        // (`<h2><a id="x"></a>Title</h2>`), cutting in front of that block tag.
+        var probe = open.location
+        while probe > 0 {
+            let c = ns.character(at: probe - 1)
+            if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D { probe -= 1 } else { break }
+        }
+        guard probe > 0, ns.character(at: probe - 1) == 0x3E /* > */ else { return nil }
+        let prevOpen = ns.range(of: "<", options: .backwards, range: NSRange(location: 0, length: probe))
+        guard prevOpen.location != NSNotFound,
+              ns.character(at: prevOpen.location + 1) != 0x2F /* not a closing tag */,
+              Self.splittableTags.contains(tagName(at: prevOpen.location, in: ns)) else { return nil }
+        return prevOpen.location
+    }
+
+    /// Lower-cased tag name starting right after the "<" at `location`.
+    nonisolated private func tagName(at location: Int, in ns: NSString) -> String {
+        var end = location + 1
+        while end < ns.length {
+            let c = ns.character(at: end)
+            let isNameChar = (c >= 0x61 && c <= 0x7A) || (c >= 0x41 && c <= 0x5A) || (c >= 0x30 && c <= 0x39)
+            if !isNameChar { break }
+            end += 1
+        }
+        return ns.substring(with: NSRange(location: location + 1, length: end - location - 1)).lowercased()
+    }
+
     // Resolve an href (possibly with ../) relative to the chapter's directory inside the zip.
     nonisolated private func resolvePath(_ src: String, relativeTo dir: String) -> String {
         // Strip any URL fragment/query
@@ -656,10 +769,14 @@ struct EPUBParser: BookParser, Sendable {
         Self.reTitle.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
         Self.reScript.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
         Self.reStyle.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
+        // Collapse source whitespace (HTML semantics) before deriving line breaks
+        Self.reSourceWS.replaceMatches(in: ms, options: [], range: full(), withTemplate: " ")
         // Block elements → newlines
         Self.reBlock.replaceMatches(in: ms, options: [], range: full(), withTemplate: "\n")
         // Strip remaining tags
         Self.reTags.replaceMatches(in: ms, options: [], range: full(), withTemplate: "")
+        // Drop the spaces that collapsing left next to block breaks
+        Self.reLineEdgeWS.replaceMatches(in: ms, options: [], range: full(), withTemplate: "\n")
         // Decode HTML entities (named + numeric/hex)
         decodeEntities(ms)
         // Collapse excess blank lines

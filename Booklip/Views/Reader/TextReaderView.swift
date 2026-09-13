@@ -2054,7 +2054,12 @@ struct NativeTextView: UIViewRepresentable {
                         // method, same safety guards (350ms budget, asymmetric dy
                         // clamp, density validity range).
                         _ = self.landingLoop(tv: tv, startY: rawY, targetCharIdx: targetCharIdx,
-                                             totalChars: totalChars, tag: "RESTORE")
+                                             totalChars: totalChars, tag: "RESTORE") { charIdx, _ in
+                            // A progress-only restore (charIndex == 0, e.g. a book
+                            // imported from another device) otherwise shows "Page 1".
+                            let capturedVM = self.vm
+                            Task { @MainActor in capturedVM?.rebasePage(atCharIdx: charIdx, totalChars: totalChars) }
+                        }
                         self.vm?.isPositioning = false
                     // Use capturedTarget (= saved charIndex / totalChars) as the
                     // authoritative progress value, not the landed measurement — see
