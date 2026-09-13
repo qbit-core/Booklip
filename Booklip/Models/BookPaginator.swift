@@ -120,7 +120,7 @@ actor BookPaginator {
         // Derive layout parameters from UITextView constants.
         // textContainerInset = (top:60, left:20, bottom:60, right:20)
         // lineFragmentPadding = 5 (UITextView default)
-        let insetH: CGFloat = 120      // top + bottom inset
+        // let insetH: CGFloat = 120   // top + bottom inset (documentation only; not used)
         let insetW: CGFloat = 40       // left + right inset
         let padding: CGFloat = 5       // lineFragmentPadding (each side)
         let layoutWidth = CGFloat(key.containerWidth) - insetW - 2 * padding

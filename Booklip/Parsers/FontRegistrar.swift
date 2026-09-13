@@ -200,6 +200,7 @@ enum FontRegistrar {
             var unregError: Unmanaged<CFError>?
             let removed = CTFontManagerUnregisterFontsForURL(existing.url as CFURL, .process, &unregError)
             // LOG: print("[Font] replacing \(psName) (different bytes); unregister ok=\(removed)")
+            _ = removed   // result was only logged; the unregister call itself is the point
             registered[psName] = nil
             // Keep the old temp file on disk — attributed strings from the previous
             // book may still hold a reference to it.

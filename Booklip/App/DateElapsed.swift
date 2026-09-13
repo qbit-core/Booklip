@@ -4,7 +4,7 @@ import os.signpost
 import UIKit
 #endif
 
-nonisolated(unsafe) let booklipSpLog = OSLog(subsystem: "com.booklip", category: "TextLayout")
+nonisolated let booklipSpLog = OSLog(subsystem: "com.booklip", category: "TextLayout")
 
 extension Date {
     /// Milliseconds elapsed since self. Safe from any concurrency context.

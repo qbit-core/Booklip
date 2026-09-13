@@ -1802,6 +1802,7 @@ struct NativeTextView: UIViewRepresentable {
                         Task { @MainActor in capturedVM?.rebasePage(atCharIdx: charIdx, totalChars: total) }
                         self.postSeekExclude = true
                     }
+                    _ = result   // landing result was only logged; the loop's scroll is the effect
                     self.vm?.isPositioning = false
 
                     // LOG: os_log("[NCL-3] applySeek-done allow=%d has=%d vo=%d target=%.3f offsetY=%.0f",
@@ -1937,12 +1938,12 @@ struct NativeTextView: UIViewRepresentable {
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             pageTargetY = nil      // user took over; forget any queued page target
             cancelRestore()   // and cancel any in-flight position restore
-            if let tv = textView {
+            // LOG: if let tv = textView {
                 // LOG: os_log("[NCL] (b) first scroll — allowsNonContiguousLayout=%d hasNonContiguousLayout=%d",
                 // LOG: log: spLog, type: .debug,
                 // LOG: tv.layoutManager.allowsNonContiguousLayout ? 1 : 0,
                 // LOG: tv.layoutManager.hasNonContiguousLayout ? 1 : 0)
-            }
+            // LOG: }
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
