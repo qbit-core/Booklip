@@ -841,6 +841,24 @@ import ImageIO
 private final class ReaderTextView: UITextView {
     var onDidLayout: (() -> Void)?
 
+    /// Offset a page turn landed on. While set, any offset change that is not
+    /// the user's finger (UITextView's own scroll-position restore after a
+    /// content-size revision) is undone. Cleared by every other mover: drag,
+    /// seek/restore, auto-scroll, TTS follow.
+    var pinnedOffsetY: CGFloat?
+    private var isRepinning = false
+
+    override var contentOffset: CGPoint {
+        didSet {
+            guard let pin = pinnedOffsetY, !isRepinning, !isDragging, !isDecelerating,
+                  abs(contentOffset.y - pin) > 1 else { return }
+            // LOG: NSLog("[OFFTRACE] repin %.0f -> %.0f (from %.0f) csH=%.0f", contentOffset.y, pin, oldValue.y, contentSize.height)
+            isRepinning = true
+            contentOffset = CGPoint(x: contentOffset.x, y: pin)
+            isRepinning = false
+        }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         // One async tick: UIScrollView commits contentSize after this frame.
@@ -1538,8 +1556,13 @@ struct NativeTextView: UIViewRepresentable {
             }
         }
 
+        /// Drop the page-turn offset pin (see ReaderTextView.pinnedOffsetY)
+        /// before any other code moves the offset.
+        private func unpin() { (textView as? ReaderTextView)?.pinnedOffsetY = nil }
+
         @objc private func autoScrollTick(_ link: CADisplayLink) {
             guard let tv = textView else { return }
+            unpin()
             let dy = CGFloat(autoScrollSpeed) * CGFloat(link.duration)
             let maxOffset = max(0, tv.contentSize.height - tv.bounds.height)
             let newY = min(tv.contentOffset.y + dy, maxOffset)
@@ -1643,6 +1666,7 @@ struct NativeTextView: UIViewRepresentable {
             let visibleTop = textView.contentOffset.y
             let visibleBot = visibleTop + textView.bounds.height
             guard sentenceBot > visibleBot || sentenceTop < visibleTop else { return }
+            unpin()
             let maxOffset = max(0, textView.contentSize.height - textView.bounds.height)
             let targetY = min(max(0, sentenceTop), maxOffset)
             isScrollingProgrammatically = true
@@ -1775,6 +1799,13 @@ struct NativeTextView: UIViewRepresentable {
             tag: String, maxAttempts: Int = 8, wallClockBudgetMs: Double = 350,
             onLanded: ((Int, Double) -> Void)? = nil
         ) -> (y: CGFloat, charIdx: Int, progress: Double) {
+            unpin()
+            defer {
+                // A seek/restore landing is just as exposed to UITextView's
+                // scroll-position restore as a page turn: pin where we landed.
+                tv.layoutIfNeeded()
+                (tv as? ReaderTextView)?.pinnedOffsetY = tv.contentOffset.y
+            }
             let lm = tv.layoutManager
             let tc = tv.textContainer
             let inset = tv.textContainerInset.top
@@ -2140,6 +2171,7 @@ struct NativeTextView: UIViewRepresentable {
         // every frame re-renders the SwiftUI tree mid-scroll and causes jitter.
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             pageTargetY = nil      // user took over; forget any queued page target
+            unpin()
             cancelRestore()   // and cancel any in-flight position restore
             // LOG: if let tv = textView {
                 // LOG: os_log("[NCL] (b) first scroll — allowsNonContiguousLayout=%d hasNonContiguousLayout=%d",
@@ -2259,6 +2291,7 @@ struct NativeTextView: UIViewRepresentable {
         func page(_ tv: UITextView, forward: Bool) {
             // LOG: let _pageT0 = CFAbsoluteTimeGetCurrent()
             cancelRestore()   // user is navigating — don't let restore reset it
+            unpin()           // the previous page's pin must not undo this turn
             let inset = tv.textContainerInset.top
             let visible = tv.bounds.height
             guard visible > 0 else { return }
@@ -2330,7 +2363,17 @@ struct NativeTextView: UIViewRepresentable {
             let capturedPageIndex = pageCounter
             pageCounter &+= 1
             pageCharMap[capturedPageIndex] = lm.characterIndexForGlyph(at: glyphIdx)
-            let maxOffset = max(0, tv.contentSize.height - visible)
+            // Clamp against the LIVE extent, not tv.contentSize alone: under
+            // non-contiguous layout contentSize lags the layout just ensured, so
+            // a turn at the layout frontier was clamped short — the next page then
+            // started somewhere inside the previous one (the intermittent
+            // "half a page again" report). layoutIfNeeded lets UITextView commit
+            // the new contentSize before the offset is set, so UIScrollView's own
+            // clamp can't undo it either.
+            tv.layoutIfNeeded()
+            let insets = tv.textContainerInset
+            let usedH = lm.usedRect(for: tc).height + insets.top + insets.bottom
+            let maxOffset = max(0, max(tv.contentSize.height, usedH) - visible)
             var finalTarget = min(max(0, lineTop + inset), maxOffset)
             // A single fragment taller than the viewport (a large image) would
             // otherwise pin the page: scroll through it one screen at a time.
@@ -2389,8 +2432,15 @@ struct NativeTextView: UIViewRepresentable {
             let capturedForward = forward
             isScrollingProgrammatically = true
             CATransaction.begin()
-            CATransaction.setCompletionBlock { [weak self, capturedPageIndex, capturedForward] in
-                guard let self else { return }
+            CATransaction.setCompletionBlock { [weak self, weak tv, capturedPageIndex, capturedForward, finalTarget] in
+                guard let self, let tv else { return }
+                // If UIScrollView clamped the offset while contentSize was still
+                // catching up, put the page where it belongs now that layout has
+                // settled. Only for THIS turn (a newer page() replaces pageTargetY).
+                if self.pageTargetY == finalTarget, !tv.isDragging,
+                   abs(tv.contentOffset.y - finalTarget) > 1 {
+                    tv.setContentOffset(CGPoint(x: 0, y: finalTarget), animated: false)
+                }
                 self.isScrollingProgrammatically = false
                 self.pageTargetY = nil
                 let charIdx = self.pageCharMap.removeValue(forKey: capturedPageIndex)
@@ -2402,7 +2452,17 @@ struct NativeTextView: UIViewRepresentable {
                 }
             }
             tv.layer.add(transition, forKey: "pageTurn")
+            // UITextView keeps a "recorded scroll position" and, whenever TextKit
+            // revises the estimated document height, restores the offset to it
+            // (-[UITextView _updateContentSize] →
+            // _setContentOffsetWithoutRecordingScrollPosition:). That record is
+            // still the PREVIOUS page when the revision lands right after a
+            // turn, so the view snapped back — the intermittent "read half of
+            // the last page again". Pin the new offset first so the pin catches
+            // the very first such restore (it can fire inside layoutIfNeeded).
+            (tv as? ReaderTextView)?.pinnedOffsetY = finalTarget
             tv.setContentOffset(CGPoint(x: 0, y: finalTarget), animated: false)
+            tv.layoutIfNeeded()
             CATransaction.commit()
         }
     }

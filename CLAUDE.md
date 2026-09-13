@@ -109,6 +109,17 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   instantly (`animated:false`) + CATransition for the visual; animated scroll
   got reverted by contentSize growth. `pageTargetY` handles rapid taps;
   paging/dragging cancels `pendingRestore`.
+- **UITextView silently restores a stale scroll position.** Whenever TextKit
+  revises the estimated document height (big txt: every few pages),
+  `-[UITextView _updateContentSize]` calls
+  `_setContentOffsetWithoutRecordingScrollPosition:` with its own recorded
+  offset — still the PREVIOUS page right after a turn — so the view snapped
+  back ("read half the last page again", ~1 in 10 turns). `ReaderTextView.
+  pinnedOffsetY` undoes any non-finger offset change while set; page() pins
+  BEFORE setContentOffset (the restore can fire inside layoutIfNeeded),
+  landingLoop pins where it lands, and drag/auto-scroll/TTS-follow unpin.
+  Diagnose this class of bug by overriding `contentOffset.didSet` and logging
+  `Thread.callStackSymbols`.
 - **Position restore** retries until the view is laid out, then verifies the
   offset stuck (SwiftUI's post-`updateUIView` frame set can reset it to 0).
 - **EPUB "some books unreadable"** = font-obfuscation. `EPUBParser` extracts
