@@ -97,12 +97,17 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   effectiveFontName` swaps to a covering font; `landingLoop` uses an exact
   `ensureLayout(forCharacterRange:)` probe (0–1 ms). `sample <pid>` before
   trusting layout timings.
-- **Paging is character-based** (`page()`): pick the glyph near the view's bottom
-  and scroll so it sits at top. Before measuring, `ensureLayout(forBoundingRect:)`
-  on the reference region (from the current frontier downward) so the glyph isn't
-  clamped to the layout frontier (caused "same page" repeats, worse deeper in).
-  Set offset instantly (`animated:false`) + CATransition for the visual; animated
-  scroll got reverted by contentSize growth. `pageTargetY` handles rapid taps;
+- **Paging is line-fragment-based** (`page()` on iOS, `navigatePage` on macOS):
+  forward lands on the first line fragment not fully visible (maxY past the
+  viewport bottom by more than 30% of its height); backward on the first
+  fragment within one viewport above the current top. No font-metric step —
+  `fontSize + lineSpacing` under-measured real line heights (worse for Korean
+  faces) and, combined with a 120pt-short "text area", re-showed several lines
+  per turn. The search rect always starts at the laid-out visible top: a rect
+  that began near the boundary let `glyphRange(forBoundingRect:)` answer from
+  estimated geometry under non-contiguous layout and skip a page. Set offset
+  instantly (`animated:false`) + CATransition for the visual; animated scroll
+  got reverted by contentSize growth. `pageTargetY` handles rapid taps;
   paging/dragging cancels `pendingRestore`.
 - **Position restore** retries until the view is laid out, then verifies the
   offset stuck (SwiftUI's post-`updateUIView` frame set can reset it to 0).

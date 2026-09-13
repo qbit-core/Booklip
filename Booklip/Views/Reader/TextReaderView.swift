@@ -618,12 +618,42 @@ struct NativeTextView: NSViewRepresentable {
         func navigatePage(direction: Int) {
             guard let sv = scrollView else { return }
             let visibleHeight = sv.contentView.bounds.height
-            let step = pageStep > 0 ? pageStep : visibleHeight
             let contentHeight = sv.documentView?.frame.height ?? 0
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let current = sv.contentView.bounds.origin.y
-            let target = max(0, min(current + CGFloat(direction) * step, scrollable))
+            // Same rule as iOS `page()`: land on the first line fragment that was
+            // not fully visible (forward) / the first line within one viewport
+            // above the current top (backward). A font-metric step under-measured
+            // real line heights and repeated lines from the previous page.
+            var target = current + CGFloat(direction) * (pageStep > 0 ? pageStep : visibleHeight)
+            if let tv = sv.documentView as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer {
+                let inset = tv.textContainerInset.height
+                let topC = current - inset
+                let bottomC = topC + visibleHeight
+                // Search from the laid-out visible top (see the iOS note on
+                // estimated geometry under non-contiguous layout).
+                let ensureRect = direction > 0
+                    ? CGRect(x: 0, y: max(0, topC), width: tc.size.width, height: visibleHeight + 240)
+                    : CGRect(x: 0, y: max(0, topC - visibleHeight - 120), width: tc.size.width, height: visibleHeight + 240)
+                lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
+                let range = lm.glyphRange(forBoundingRect: ensureRect, in: tc)
+                if range.location != NSNotFound, range.length > 0 {
+                    var lineTop: CGFloat? = nil
+                    lm.enumerateLineFragments(forGlyphRange: range) { _, usedRect, _, _, stop in
+                        let hit = direction > 0 ? usedRect.maxY > bottomC + usedRect.height * 0.3
+                                                : usedRect.minY >= topC - visibleHeight - 0.5
+                        if lineTop == nil, hit { lineTop = usedRect.minY; stop.pointee = true }
+                    }
+                    if let lineTop {
+                        target = lineTop + inset
+                        // An oversized fragment (large image): step a screen instead.
+                        if direction > 0, target <= current + 1 { target = current + visibleHeight }
+                        if direction < 0, target >= current - 1 { target = current - visibleHeight }
+                    }
+                }
+            }
+            target = max(0, min(target, scrollable))
             guard abs(target - current) > 1 else { return }
 
             // Same visual as iOS: set the offset instantly and let a CATransition
@@ -2235,59 +2265,62 @@ struct NativeTextView: UIViewRepresentable {
             let lm = tv.layoutManager
             let tc = tv.textContainer
 
-            // Compute pageStep from actual line metrics so scroll distance exactly
-            // matches the rendered text area — floor(textAreaH/lineHeight)*lineHeight.
-            // Fallback: visible - 80 (legacy behaviour) when settings are unavailable.
-            let pageStep: CGFloat = {
-                if let s = settings, let v = vm, v.textAreaSize.height > 0 {
-                    let fSize = CGFloat(max(1.0, s.fontSize))
-                    let lh    = fSize + CGFloat(max(0.0, s.lineSpacing))
-                    let lpp   = floor(v.textAreaSize.height / lh)
-                    return lpp * lh
-                }
-                return visible - 80
-            }()
-
-            // Page by CHARACTER, not raw pixels: pick the glyph near the bottom
-            // of the current view (for forward) and scroll so it sits at the top.
-            // That glyph is already laid out, so the offset can't be clamped and
-            // we never force a big relayout that would shift the pixel↔char map.
+            // Page by LINE FRAGMENT, not by a computed step. The old step —
+            // floor(textAreaH / (fontSize + lineSpacing)) lines, with textAreaH
+            // already 120pt short of the viewport — assumed a line is exactly
+            // fontSize tall. Real line heights are larger (Georgia 19pt ≈ 21.6pt,
+            // Korean faces more), so every turn moved less than one screen and
+            // the next page re-showed several lines of the previous one; with the
+            // bars hidden the bottom 120pt repeated on top of that.
+            //
+            // Forward: the new top is the first line that was not fully visible
+            // (usedRect.maxY past the viewport bottom). Backward: the first line
+            // whose top lies within one viewport above the current top line, so
+            // the current top becomes the first line off the bottom of the new
+            // page. Both read the laid-out geometry, so any font, spacing or
+            // inline image is handled exactly, and no line is ever skipped or
+            // shown twice. Bounded to a small ensured region so this stays
+            // O(local) under non-contiguous layout.
             let base = pageTargetY ?? tv.contentOffset.y
-            let refContentY = forward ? base + pageStep : base - pageStep
-            let refContainerY = max(0, refContentY - inset)
-            // Lay out the region around the reference point (extends only from the
-            // current layout frontier downward — content above is untouched), so
-            // glyphIndex returns the real glyph instead of a clamped one near the
-            // frontier (which would repeat the page).
-            let ensureRect = CGRect(x: 0, y: refContainerY, width: tc.size.width, height: pageStep + 80)
+            let topContainerY = base - inset                       // container y at viewport top
+            let bottomContainerY = topContainerY + visible          // container y at viewport bottom
+            // The search region always starts at the (already laid out) visible
+            // top and runs contiguously past the boundary. Asking for a rect that
+            // began near the boundary let glyphRange(forBoundingRect:) answer from
+            // ESTIMATED geometry under non-contiguous layout and skip a page.
+            let ensureRect: CGRect
+            if forward {
+                ensureRect = CGRect(x: 0, y: max(0, topContainerY), width: tc.size.width, height: visible + 240)
+            } else {
+                ensureRect = CGRect(x: 0, y: max(0, topContainerY - visible - 120), width: tc.size.width,
+                                    height: visible + 240)
+            }
             lm.ensureLayout(forBoundingRect: ensureRect, in: tc)
-            // BUG (3rd attempt — point/rect hit-testing is inherently ambiguous at line
-            // boundaries): both glyphRange(forBoundingRect:) and glyphIndex(for:point:)
-            // resolve a boundary point by "nearest" or "overlapping" glyph, which can
-            // snap to the PREVIOUS line's trailing glyph when the target Y sits exactly
-            // on (or a hair past) that line's lower edge — reproducing the same ~1-line
-            // (621pt vs pageStep=648pt) undershoot regardless of which hit-test API is used.
-            // Fix: enumerate line fragments directly (same technique BookPaginator uses
-            // to place page boundaries) and take the first fragment whose usedRect.minY
-            // is at/after refContainerY — no hit-testing, no boundary ambiguity.
-            // Bounded to glyphRange(forBoundingRect: ensureRect) so this stays O(local)
-            // under NCL instead of forcing full-document layout.
             let boundedGlyphRange = lm.glyphRange(forBoundingRect: ensureRect, in: tc)
             guard boundedGlyphRange.location != NSNotFound, boundedGlyphRange.length > 0 else {
-                // LOG: print(String(format: "[PAGE] forward=%d STALLED no-glyphs-in-range base=%.0f refContainerY=%.0f",
-                // LOG: forward ? 1 : 0, base, refContainerY))
+                // LOG: print(String(format: "[PAGE] forward=%d STALLED no-glyphs-in-range base=%.0f",
+                // LOG: forward ? 1 : 0, base))
                 return
             }
             var glyphIdx = NSNotFound
+            var lineTop: CGFloat = 0
+            let backwardLimit = topContainerY - visible
             lm.enumerateLineFragments(forGlyphRange: boundedGlyphRange) { _, usedRect, _, glyphRange, stop in
-                if glyphIdx == NSNotFound, usedRect.minY >= refContainerY - 0.5 {
+                // A line whose descender is clipped by a few points still reads
+                // fine; only a line missing more than 30% of its height is
+                // "not shown yet". Without this, the last line often repeated.
+                let clipTolerance = usedRect.height * 0.3
+                let hit = forward ? usedRect.maxY > bottomContainerY + clipTolerance
+                                  : usedRect.minY >= backwardLimit - 0.5
+                if glyphIdx == NSNotFound, hit {
                     glyphIdx = glyphRange.location
+                    lineTop = usedRect.minY
                     stop.pointee = true
                 }
             }
             guard glyphIdx != NSNotFound, glyphIdx < lm.numberOfGlyphs else {
-                // LOG: print(String(format: "[PAGE] forward=%d STALLED glyphIdx-not-found base=%.0f refContainerY=%.0f",
-                // LOG: forward ? 1 : 0, base, refContainerY))
+                // LOG: print(String(format: "[PAGE] forward=%d STALLED glyphIdx-not-found base=%.0f",
+                // LOG: forward ? 1 : 0, base))
                 return
             }
             // characterIndexForGlyph is O(1): glyph→char map built by ensureLayout.
@@ -2297,9 +2330,15 @@ struct NativeTextView: UIViewRepresentable {
             let capturedPageIndex = pageCounter
             pageCounter &+= 1
             pageCharMap[capturedPageIndex] = lm.characterIndexForGlyph(at: glyphIdx)
-            let rect = lm.boundingRect(forGlyphRange: NSRange(location: glyphIdx, length: 1), in: tc)
             let maxOffset = max(0, tv.contentSize.height - visible)
-            let finalTarget = min(max(0, rect.minY + inset), maxOffset)
+            var finalTarget = min(max(0, lineTop + inset), maxOffset)
+            // A single fragment taller than the viewport (a large image) would
+            // otherwise pin the page: scroll through it one screen at a time.
+            if forward, finalTarget <= base + 1 {
+                finalTarget = min(base + visible, maxOffset)
+            } else if !forward, finalTarget >= base - 1 {
+                finalTarget = max(base - visible, 0)
+            }
             guard abs(finalTarget - base) > 1 else {
                 // LOG: print(String(format: "[PAGE] forward=%d STALLED no-movement base=%.0f finalTarget=%.0f refContainerY=%.0f maxOffset=%.0f pageStep=%.1f",
                 // LOG: forward ? 1 : 0, base, finalTarget, refContainerY, maxOffset, pageStep))
