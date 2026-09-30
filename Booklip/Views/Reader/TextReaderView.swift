@@ -501,7 +501,30 @@ struct NativeTextView: NSViewRepresentable {
             parent.submenu = sub
             menu.insertItem(NSMenuItem.separator(), at: 0)
             menu.insertItem(parent, at: 0)
+            // Dictionary popover for the selection (same as ⌃⌘D / three-finger tap).
+            let define = NSMenuItem(title: "Define", action: #selector(defineMenuAction(_:)), keyEquivalent: "")
+            define.target = self
+            menu.insertItem(define, at: 0)
             return menu
+        }
+
+        @objc private func defineMenuAction(_ sender: NSMenuItem) {
+            guard let tv = scrollView?.documentView as? NSTextView,
+                  let storage = tv.textStorage else { return }
+            let sel = tv.selectedRange()
+            guard sel.length > 0, sel.location < storage.length else { return }
+            let safe = NSRange(location: sel.location, length: min(sel.length, storage.length - sel.location))
+            let attr = storage.attributedSubstring(from: safe)
+            let origin: NSPoint = {
+                guard let lm = tv.layoutManager, let tc = tv.textContainer else { return .zero }
+                let glyphs = lm.glyphRange(forCharacterRange: safe, actualCharacterRange: nil)
+                var rect = lm.boundingRect(forGlyphRange: glyphs, in: tc)
+                rect.origin.x += tv.textContainerInset.width
+                rect.origin.y += tv.textContainerInset.height
+                return NSPoint(x: rect.minX, y: rect.maxY)
+            }()
+            tv.showDefinition(for: attr, range: NSRange(location: 0, length: attr.length),
+                              options: [:], baselineOriginProvider: { _ in origin })
         }
 
         @objc private func highlightMenuAction(_ sender: NSMenuItem) {
@@ -1405,7 +1428,8 @@ struct NativeTextView: UIViewRepresentable {
         return UIImage(cgImage: cgImage, scale: screenScale, orientation: .up)
     }
 
-    class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
+    class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate,
+                       UIPopoverPresentationControllerDelegate {
         @Binding var progress: Double
         @Binding var autoScrolling: Bool
         let onTap: (CGFloat) -> Void
@@ -2283,7 +2307,51 @@ struct NativeTextView: UIViewRepresentable {
             let highlightMenu = UIMenu(title: "Highlight",
                                        image: UIImage(systemName: "highlighter"),
                                        children: actions)
-            return UIMenu(children: suggestedActions + [highlightMenu])
+            // Dictionary definition of the selected word, shown in a popover
+            // right next to the selection (the system "Look Up" opens a
+            // full-screen sheet with web results instead).
+            let define = UIAction(title: "Define", image: UIImage(systemName: "character.book.closed")) { [weak self] _ in
+                self?.showDefinition(for: range)
+            }
+            return UIMenu(children: suggestedActions + [define, highlightMenu])
+        }
+
+        /// Presents the system dictionary for the selected text as a popover
+        /// anchored to the selection, on iPhone as well as iPad.
+        private func showDefinition(for range: NSRange) {
+            guard let tv = textView else { return }
+            let ns = tv.textStorage.string as NSString
+            let safe = NSRange(location: range.location, length: min(range.length, ns.length - range.location))
+            let term = ns.substring(with: safe)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: .punctuationCharacters)
+            guard !term.isEmpty, let presenter = tv.window?.rootViewController?.topmostPresented else { return }
+
+            let ref = UIReferenceLibraryViewController(term: term)
+            ref.modalPresentationStyle = .popover
+            ref.preferredContentSize = CGSize(width: 360, height: 440)
+            if let pop = ref.popoverPresentationController {
+                pop.sourceView = tv
+                pop.sourceRect = selectionRect(safe, in: tv)
+                pop.permittedArrowDirections = [.up, .down]
+                pop.delegate = self   // keep it a popover on compact widths
+            }
+            presenter.present(ref, animated: true)
+        }
+
+        /// First line's rect of `range` in the text view's coordinates.
+        private func selectionRect(_ range: NSRange, in tv: UITextView) -> CGRect {
+            let lm = tv.layoutManager
+            let glyphs = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var rect = lm.boundingRect(forGlyphRange: glyphs, in: tv.textContainer)
+            rect.origin.x += tv.textContainerInset.left
+            rect.origin.y += tv.textContainerInset.top
+            return rect.isEmpty ? CGRect(x: tv.bounds.midX, y: tv.bounds.midY, width: 1, height: 1) : rect
+        }
+
+        func adaptivePresentationStyle(for controller: UIPresentationController,
+                                       traitCollection: UITraitCollection) -> UIModalPresentationStyle {
+            .none
         }
 
         private var pageTargetY: CGFloat?   // intended offset while a turn animates

@@ -229,3 +229,16 @@ private struct ReaderStandaloneWindow<Item: Identifiable, Content: View>: NSView
     }
 }
 #endif
+
+#if os(iOS)
+extension UIViewController {
+    /// The view controller at the top of this controller's presentation chain —
+    /// the one that can present something new (the reader is itself a
+    /// full-screen cover, so the window's root cannot).
+    var topmostPresented: UIViewController {
+        var vc = self
+        while let next = vc.presentedViewController, !next.isBeingDismissed { vc = next }
+        return vc
+    }
+}
+#endif
