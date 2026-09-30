@@ -140,7 +140,10 @@ struct ReaderView: View {
         // feature 3: apply color scheme globally so bars & system UI also adapt
         .preferredColorScheme(settings.preferredColorScheme)
         .task { vm.load() }
-        .onAppear { sessionStart = Date() }
+        .onAppear {
+            sessionStart = Date()
+            tts.setNowPlaying(title: book.title, artist: book.author)   // lock-screen card
+        }
         .onDisappear {
             saveProgress()
             tts.stop()

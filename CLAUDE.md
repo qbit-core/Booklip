@@ -126,10 +126,27 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   embedded fonts, de-obfuscates (IDPF SHA-1 / Adobe UUID key, XOR of first
   1040/1024 bytes) using the package unique-identifier, registers via CoreText,
   and renders body text in that font (toggle: Appearance → "Use book's font").
-- **TTS** must be chunked (≤500 chars; `TTSManager.maxChunkLength`, paragraphs
+- **TTS** must be chunked (≤240 chars; `TTSManager.maxChunkLength`, paragraphs
   subdivided at sentence boundaries) or AVSpeechSynthesizer crashes on
   whole-document utterances. TTS is stopped only on reader dismissal, never on
   scenePhase `.inactive` (lock screen / Control Center must not kill playback).
+- **TTS in the background.** `UIBackgroundModes = audio` alone is not enough:
+  AVSpeechSynthesizer deactivates the audio session whenever its queue empties,
+  and one-utterance-at-a-time chunking emptied it at every chunk boundary, so a
+  locked phone suspended the app there. `TTSManager` now owns session
+  activation (`setActive(true)` on speak, off on stop), keeps `queueDepth`
+  utterances queued ahead (per-utterance `UtteranceMeta` maps callbacks back to
+  document offsets), pauses on interruptions / headphone unplug, and registers
+  MPRemoteCommandCenter + Now Playing so the lock screen can control it.
+- **TTS highlight sync.** `willSpeakRangeOfSpeechString` tracks the synthesizer,
+  not the speaker. Measured on the simulator: didFinish lands 0.12 s after the
+  rendered audio ends (constant, no cross-utterance accumulation), so any lead
+  is within one utterance — hence the 240-char cap — plus the output path
+  (`outputLatency + ioBufferDuration`, ≈0.2 s on Bluetooth), which the
+  highlight delays by. If a device still shows drift with a neural voice, the
+  next step is audio-clock sync: `write(_:toBufferCallback:toMarkerCallback:)`
+  + AVAudioPlayerNode with marker offsets (markers are empty on simulator
+  voices, so it needs a device to develop).
 - **Progress save**: `charIndex` is `nil` when unknown (PDF, text not loaded)
   and a real `0` when at the start — `LibraryViewModel.updateProgress` stores
   any non-nil value.

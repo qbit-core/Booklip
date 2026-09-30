@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import MediaPlayer
 import NaturalLanguage
 import SwiftUI
 
@@ -27,13 +28,32 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var fullText: NSString = ""
     /// Paragraph-level chunks — each becomes one AVSpeechUtterance.
     private var chunkRanges: [NSRange] = []
+    /// Index of the chunk currently being spoken (the one whose utterance started last).
     private var currentChunkIndex = 0
-    /// Global UTF-16 offset of the first character of the current utterance.
-    /// nonisolated(unsafe): set on MainActor before synthesizer.speak(); read-only in delegate callbacks.
-    nonisolated(unsafe) private var chunkBaseOffset = 0
-    /// Sentence ranges within the CURRENT chunk (local / 0-based coords relative to chunkBaseOffset).
-    /// nonisolated(unsafe): written on MainActor before synthesizer.speak(); read-only in delegate callbacks.
-    nonisolated(unsafe) private var chunkSentenceRanges: [NSRange] = []
+    /// Next chunk to hand to the synthesizer. Runs ahead of currentChunkIndex by
+    /// up to `queueDepth` so the synthesizer's queue is never empty: an empty
+    /// queue lets it deactivate the audio session, and a background app whose
+    /// audio session goes silent is suspended within seconds (TTS "stopped when
+    /// the screen turned off").
+    private var nextChunkToEnqueue = 0
+    private static let queueDepth = 2
+
+    /// Per-utterance mapping back to document coordinates. Written on the main
+    /// actor before speak(), read from AVFoundation's delegate callbacks under
+    /// `metaLock` — the callbacks arrive on an internal AVFoundation queue.
+    private struct UtteranceMeta {
+        let chunkIndex: Int
+        let baseOffset: Int          // global UTF-16 offset of the chunk's first char
+        let sentences: [NSRange]     // local (0-based) sentence ranges in the chunk
+    }
+    nonisolated(unsafe) private var utteranceMeta: [ObjectIdentifier: UtteranceMeta] = [:]
+    private let metaLock = NSLock()
+
+    /// Playback state around an audio-session interruption (phone call, Siri).
+    private var resumeAfterInterruption = false
+    private var observers: [NSObjectProtocol] = []
+    private var nowPlayingTitle = "Booklip"
+    private var nowPlayingArtist = ""
 
     // Cached once — speechVoices() hits an AVFoundation internal decoder on
     // repeated calls which logs a DecodingError and can return an empty list.
@@ -48,8 +68,14 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         synthesizer.delegate = self
 #if os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+        installSessionObservers()
 #endif
+        installRemoteCommands()
         refreshVoices()
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     func refreshVoices() {
@@ -75,34 +101,53 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Public API
 
+    /// What the lock screen / Control Center shows while speaking.
+    func setNowPlaying(title: String, artist: String) {
+        nowPlayingTitle = title
+        nowPlayingArtist = artist
+        updateNowPlaying()
+    }
+
     func speak(text: String, from offset: Int = 0) {
         synthesizer.stopSpeaking(at: .immediate)
+        clearMeta()
         fullText = text as NSString
         chunkRanges = makeParagraphChunks(in: text)
         // Start at the chunk that contains or starts at/after offset.
         currentChunkIndex = chunkRanges.firstIndex { NSMaxRange($0) > offset } ?? 0
-        speakCurrentChunk()
+        nextChunkToEnqueue = currentChunkIndex
+        activateAudioSession()
+        fillQueue()
+        isPlaying = !chunkRanges.isEmpty
+        if chunkRanges.isEmpty { spokenRange = nil }
+        updateNowPlaying()
     }
 
     func pause() {
         synthesizer.pauseSpeaking(at: .word)
         isPlaying = false
+        updateNowPlaying()
     }
 
     func resume() {
         guard synthesizer.isPaused else { return }
+        activateAudioSession()
         synthesizer.continueSpeaking()
         isPlaying = true
+        updateNowPlaying()
     }
 
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
-        chunkSentenceRanges = []
+        clearMeta()
         chunkRanges = []
         currentChunkIndex = 0
-        chunkBaseOffset = 0
+        nextChunkToEnqueue = 0
         isPlaying = false
         spokenRange = nil
+        resumeAfterInterruption = false
+        deactivateAudioSession()
+        updateNowPlaying()
     }
 
     // MARK: - Sleep timer
@@ -112,7 +157,7 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         sleepTimer = nil
         sleepMinutes = minutes
         guard let minutes else { return }
-        sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { _ in
+        sleepTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.stop()
@@ -131,12 +176,126 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    // MARK: - Audio session (iOS)
+
+    /// The synthesizer only keeps the session active while its queue is
+    /// non-empty; owning activation ourselves keeps background playback alive
+    /// across chunk boundaries and lets the lock screen show our controls.
+    private func activateAudioSession() {
+#if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio)
+        try? session.setActive(true)
+#endif
+    }
+
+    private func deactivateAudioSession() {
+#if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+#endif
+    }
+
+#if os(iOS)
+    private func installSessionObservers() {
+        let nc = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        // Delivered on the main queue; pull the plain values out before hopping
+        // to the actor so the non-Sendable Notification is not captured.
+        observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification,
+                                        object: session, queue: .main) { [weak self] note in
+            let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let opts = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            Task { @MainActor [weak self] in self?.handleInterruption(typeRaw: type, optionsRaw: opts) }
+        })
+        observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification,
+                                        object: session, queue: .main) { [weak self] note in
+            let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            Task { @MainActor [weak self] in self?.handleRouteChange(reasonRaw: reason) }
+        })
+    }
+
+    private func handleInterruption(typeRaw: UInt?, optionsRaw: UInt?) {
+        guard let raw = typeRaw, let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            // A call / Siri / another player took the session. Pause so the
+            // synthesizer does not keep advancing chunks into a dead session.
+            resumeAfterInterruption = isPlaying
+            if isPlaying {
+                synthesizer.pauseSpeaking(at: .immediate)
+                isPlaying = false
+                updateNowPlaying()
+            }
+        case .ended:
+            let opts = AVAudioSession.InterruptionOptions(rawValue: optionsRaw ?? 0)
+            if resumeAfterInterruption, opts.contains(.shouldResume) { resume() }
+            resumeAfterInterruption = false
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleRouteChange(reasonRaw: UInt?) {
+        guard let raw = reasonRaw,
+              AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+        // Headphones unplugged: stop blasting through the speaker (system convention).
+        if isPlaying { pause() }
+    }
+#endif
+
+    // MARK: - Remote commands / Now Playing
+
+    private func installRemoteCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            if self.synthesizer.isPaused { self.resume(); return .success }
+            return .commandFailed
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            guard let self, self.isPlaying else { return .commandFailed }
+            self.pause(); return .success
+        }
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            if self.isPlaying { self.pause() } else if self.synthesizer.isPaused { self.resume() } else { return .commandFailed }
+            return .success
+        }
+        center.stopCommand.addTarget { [weak self] _ in
+            self?.stop(); return .success
+        }
+        // Nothing sensible to skip to; hide the buttons.
+        center.nextTrackCommand.isEnabled = false
+        center.previousTrackCommand.isEnabled = false
+        center.skipForwardCommand.isEnabled = false
+        center.skipBackwardCommand.isEnabled = false
+    }
+
+    private func updateNowPlaying() {
+        let center = MPNowPlayingInfoCenter.default()
+        guard isPlaying || synthesizer.isPaused else {
+            center.nowPlayingInfo = nil
+            return
+        }
+        center.nowPlayingInfo = [
+            MPMediaItemPropertyTitle: nowPlayingTitle,
+            MPMediaItemPropertyArtist: nowPlayingArtist,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyIsLiveStream: false,
+        ]
+    }
+
     // MARK: - Chunking
 
     /// Upper bound on one utterance. AVSpeechSynthesizer crashes/hangs on very
     /// large utterances (CLAUDE.md), so every chunk is capped regardless of how
-    /// the text is paragraphed.
-    private static let maxChunkLength = 500
+    /// the text is paragraphed. Kept short (a sentence or two) on purpose: the
+    /// per-word `willSpeakRangeOfSpeechString` callbacks track the synthesizer,
+    /// not the speaker, so with neural voices they can run ahead of the audio
+    /// within one utterance and only re-align at the next one. A shorter chunk
+    /// bounds that lead; queue-ahead (`queueDepth`) removes the gap that used
+    /// to make short chunks costly.
+    private static let maxChunkLength = 240
 
     /// Splits text at paragraph breaks (2+ newlines), then subdivides any paragraph
     /// longer than `maxChunkLength` at sentence boundaries (hard-splitting a single
@@ -229,20 +388,22 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Playback
 
-    private func speakCurrentChunk() {
-        guard currentChunkIndex < chunkRanges.count else {
-            isPlaying = false
-            spokenRange = nil
-            return
+    /// Hands chunks to the synthesizer until `queueDepth` of them are queued
+    /// beyond the one playing (or the text runs out).
+    private func fillQueue() {
+        while nextChunkToEnqueue < chunkRanges.count,
+              nextChunkToEnqueue - currentChunkIndex < Self.queueDepth {
+            enqueue(chunkIndex: nextChunkToEnqueue)
+            nextChunkToEnqueue += 1
         }
-        let range = chunkRanges[currentChunkIndex]
-        // Store before speak() so willSpeakRangeOfSpeechString can map offsets.
-        chunkBaseOffset = range.location
+    }
+
+    private func enqueue(chunkIndex: Int) {
+        let range = chunkRanges[chunkIndex]
         let raw = fullText.substring(with: range)
-        // Compute sentence ranges in LOCAL (0-based) coords of this chunk.
-        // Using local coords means AVFoundation's characterRange.location maps
-        // directly — no global offset arithmetic needed for the lookup.
-        chunkSentenceRanges = makeSentenceRanges(in: raw)
+        // Sentence ranges in LOCAL (0-based) coords of this chunk, so
+        // AVFoundation's characterRange.location maps directly.
+        let sentences = makeSentenceRanges(in: raw)
         // Normalize newlines (and EPUB image placeholders U+FFFC) to spaces 1:1 so
         // AVFoundation characterRange positions stay aligned with the original
         // local coords.
@@ -253,35 +414,82 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         utterance.voice = selectedVoice
         utterance.rate = rate
         utterance.pitchMultiplier = pitch
+        metaLock.lock()
+        utteranceMeta[ObjectIdentifier(utterance)] = UtteranceMeta(
+            chunkIndex: chunkIndex, baseOffset: range.location, sentences: sentences)
+        metaLock.unlock()
         synthesizer.speak(utterance)
-        isPlaying = true
+    }
+
+    private nonisolated func meta(for utterance: AVSpeechUtterance) -> UtteranceMeta? {
+        metaLock.lock(); defer { metaLock.unlock() }
+        return utteranceMeta[ObjectIdentifier(utterance)]
+    }
+
+    private func clearMeta() {
+        metaLock.lock(); utteranceMeta.removeAll(); metaLock.unlock()
     }
 
     // MARK: - AVSpeechSynthesizerDelegate
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                                       willSpeakRangeOfSpeechString characterRange: NSRange,
-                                       utterance: AVSpeechUtterance) {
-        // Look up the sentence in LOCAL (chunk-relative) coords.
-        // chunkBaseOffset and chunkSentenceRanges are nonisolated(unsafe):
-        // written on MainActor before synthesizer.speak(), so no concurrent writes.
-        let localPos = characterRange.location
-        guard let localSentence = chunkSentenceRanges.first(where: {
-            $0.location <= localPos && localPos < NSMaxRange($0)
-        }) else { return }
-        let globalSentence = NSRange(location: chunkBaseOffset + localSentence.location,
-                                     length: localSentence.length)
+                                       didStart utterance: AVSpeechUtterance) {
+        guard let m = meta(for: utterance) else { return }
         Task { @MainActor [self] in
-            if let current = spokenRange, NSEqualRanges(current, globalSentence) { return }
-            spokenRange = globalSentence
+            currentChunkIndex = m.chunkIndex
+            fillQueue()
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                                       didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor [self] in
-            currentChunkIndex += 1
-            speakCurrentChunk()
+                                       willSpeakRangeOfSpeechString characterRange: NSRange,
+                                       utterance: AVSpeechUtterance) {
+        guard let m = meta(for: utterance) else { return }
+        let localPos = characterRange.location
+        guard let localSentence = m.sentences.first(where: {
+            $0.location <= localPos && localPos < NSMaxRange($0)
+        }) else { return }
+        let globalSentence = NSRange(location: m.baseOffset + localSentence.location,
+                                     length: localSentence.length)
+        // The callback marks when the synthesizer hands the word to the audio
+        // output, not when the listener hears it: the output path adds the I/O
+        // buffer plus the route's latency (≈0.2 s on Bluetooth headphones).
+        // Delay the highlight by that much so it lands with the audio.
+        let delay = Self.outputDelay()
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            if let current = self.spokenRange, NSEqualRanges(current, globalSentence) { return }
+            self.spokenRange = globalSentence
         }
+    }
+
+    /// Seconds between the synthesizer emitting audio and it leaving the speaker.
+    private nonisolated static func outputDelay() -> TimeInterval {
+#if os(iOS)
+        let s = AVAudioSession.sharedInstance()
+        return min(0.6, max(0, s.outputLatency + s.ioBufferDuration))
+#else
+        return 0
+#endif
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       didFinish utterance: AVSpeechUtterance) {
+        guard let m = meta(for: utterance) else { return }
+        metaLock.lock(); utteranceMeta.removeValue(forKey: ObjectIdentifier(utterance)); metaLock.unlock()
+        Task { @MainActor [self] in
+            // Last chunk finished and nothing else is queued: done.
+            if m.chunkIndex + 1 >= chunkRanges.count {
+                isPlaying = false
+                spokenRange = nil
+                deactivateAudioSession()
+                updateNowPlaying()
+            }
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       didCancel utterance: AVSpeechUtterance) {
+        metaLock.lock(); utteranceMeta.removeValue(forKey: ObjectIdentifier(utterance)); metaLock.unlock()
     }
 }
