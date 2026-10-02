@@ -14,8 +14,13 @@ dependency: **ZIPFoundation** (SPM, for EPUB).
 - `@main struct BooklipApp` in `Booklip/App/BooklipApp.swift`
 - Bundle id: `qbit-core.Booklip` · Team: `RFL8CL8THH`
 - Info.plist is **generated** (`GENERATE_INFOPLIST_FILE = YES`, settings via
-  `INFOPLIST_KEY_*`). Do NOT add `INFOPLIST_FILE` — there is no plist file and
-  doing so breaks the build.
+  `INFOPLIST_KEY_*`) and merged with `Booklip-Info.plist` at the repo root
+  (`INFOPLIST_FILE`). That file holds only what `INFOPLIST_KEY_*` cannot
+  express — `UIBackgroundModes` — and must stay OUTSIDE `Booklip/` (the
+  synchronized folder would also copy it as a resource and break the build).
+  `INFOPLIST_KEY_UIBackgroundModes` is silently ignored by Xcode: 1.5.5
+  build 10 shipped without the key, so TTS died on screen lock. After touching
+  this, check the product: `PlistBuddy -c "Print :UIBackgroundModes"`.
 
 ## Build / run
 ```bash
@@ -126,11 +131,15 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   embedded fonts, de-obfuscates (IDPF SHA-1 / Adobe UUID key, XOR of first
   1040/1024 bytes) using the package unique-identifier, registers via CoreText,
   and renders body text in that font (toggle: Appearance → "Use book's font").
-- **TTS** must be chunked (≤240 chars; `TTSManager.maxChunkLength`, paragraphs
-  subdivided at sentence boundaries) or AVSpeechSynthesizer crashes on
-  whole-document utterances. TTS is stopped only on reader dismissal, never on
+- **TTS** must be chunked or AVSpeechSynthesizer crashes on whole-document
+  utterances: whole sentences are packed up to `TTSManager.maxChunkLength`
+  (240). A sentence is NEVER cut — one longer than 240 is its own utterance,
+  read and highlighted whole (hard-splitting at 240 cut words in half:
+  "let me un" / "derstand you"). Only past `maxSentenceLength` (2000, text
+  with no sentence punctuation) is it split, at whitespace. TTS is stopped only on reader dismissal, never on
   scenePhase `.inactive` (lock screen / Control Center must not kill playback).
-- **TTS in the background.** `UIBackgroundModes = audio` alone is not enough:
+- **TTS in the background.** Needs `UIBackgroundModes = audio` actually in the
+  built Info.plist (see `Booklip-Info.plist` above), and that alone is not enough:
   AVSpeechSynthesizer deactivates the audio session whenever its queue empties,
   and one-utterance-at-a-time chunking emptied it at every chunk boundary, so a
   locked phone suspended the app there. `TTSManager` now owns session
@@ -138,6 +147,9 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   utterances queued ahead (per-utterance `UtteranceMeta` maps callbacks back to
   document offsets), pauses on interruptions / headphone unplug, and registers
   MPRemoteCommandCenter + Now Playing so the lock screen can control it.
+  Remote play (`remotePlay`) resumes a paused synthesizer, and re-speaks from
+  `currentChunkIndex` if the synthesizer lost its queue — it must never
+  answer `.commandFailed` just because `isPaused` is false.
 - **TTS highlight sync.** `willSpeakRangeOfSpeechString` tracks the synthesizer,
   not the speaker. Measured on the simulator: didFinish lands 0.12 s after the
   rendered audio ends (constant, no cross-utterance accumulation), so any lead

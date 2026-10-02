@@ -114,8 +114,13 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         fullText = text as NSString
         chunkRanges = makeParagraphChunks(in: text)
         // Start at the chunk that contains or starts at/after offset.
-        currentChunkIndex = chunkRanges.firstIndex { NSMaxRange($0) > offset } ?? 0
-        nextChunkToEnqueue = currentChunkIndex
+        startSpeaking(fromChunk: chunkRanges.firstIndex { NSMaxRange($0) > offset } ?? 0)
+    }
+
+    /// (Re)starts the synthesizer at `index` of the already-chunked text.
+    private func startSpeaking(fromChunk index: Int) {
+        currentChunkIndex = index
+        nextChunkToEnqueue = index
         activateAudioSession()
         fillQueue()
         isPlaying = !chunkRanges.isEmpty
@@ -129,12 +134,14 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         updateNowPlaying()
     }
 
-    func resume() {
-        guard synthesizer.isPaused else { return }
+    @discardableResult
+    func resume() -> Bool {
+        guard synthesizer.isPaused else { return false }
         activateAudioSession()
-        synthesizer.continueSpeaking()
+        guard synthesizer.continueSpeaking() else { return false }
         isPlaying = true
         updateNowPlaying()
+        return true
     }
 
     func stop() {
@@ -249,17 +256,17 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            if self.synthesizer.isPaused { self.resume(); return .success }
-            return .commandFailed
+            return self.remotePlay() ? .success : .noActionableNowPlayingItem
         }
         center.pauseCommand.addTarget { [weak self] _ in
-            guard let self, self.isPlaying else { return .commandFailed }
-            self.pause(); return .success
+            guard let self else { return .commandFailed }
+            if self.isPlaying { self.pause() }
+            return .success
         }
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            if self.isPlaying { self.pause() } else if self.synthesizer.isPaused { self.resume() } else { return .commandFailed }
-            return .success
+            if self.isPlaying { self.pause(); return .success }
+            return self.remotePlay() ? .success : .noActionableNowPlayingItem
         }
         center.stopCommand.addTarget { [weak self] _ in
             self?.stop(); return .success
@@ -269,6 +276,24 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         center.previousTrackCommand.isEnabled = false
         center.skipForwardCommand.isEnabled = false
         center.skipBackwardCommand.isEnabled = false
+    }
+
+    /// Play from the lock screen / headset. Resumes a paused synthesizer; if the
+    /// synthesizer lost its queue instead (the system tore the session down
+    /// while we were silent), speaks again from the chunk it had reached.
+    private func remotePlay() -> Bool {
+        if synthesizer.isPaused {
+            if resume() { return true }
+        } else if synthesizer.isSpeaking {
+            isPlaying = true
+            updateNowPlaying()
+            return true
+        }
+        guard currentChunkIndex < chunkRanges.count else { return false }
+        synthesizer.stopSpeaking(at: .immediate)
+        clearMeta()
+        startSpeaking(fromChunk: currentChunkIndex)
+        return isPlaying
     }
 
     private func updateNowPlaying() {
@@ -287,20 +312,27 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - Chunking
 
-    /// Upper bound on one utterance. AVSpeechSynthesizer crashes/hangs on very
-    /// large utterances (CLAUDE.md), so every chunk is capped regardless of how
-    /// the text is paragraphed. Kept short (a sentence or two) on purpose: the
+    /// Target size of one utterance: whole sentences are packed together up to
+    /// this many UTF-16 units. Kept short (a sentence or two) on purpose: the
     /// per-word `willSpeakRangeOfSpeechString` callbacks track the synthesizer,
     /// not the speaker, so with neural voices they can run ahead of the audio
     /// within one utterance and only re-align at the next one. A shorter chunk
     /// bounds that lead; queue-ahead (`queueDepth`) removes the gap that used
-    /// to make short chunks costly.
+    /// to make short chunks costly. A single sentence longer than this is NOT
+    /// cut — it becomes one utterance of its own, so it is read and highlighted
+    /// as a whole.
     private static let maxChunkLength = 240
 
+    /// Hard ceiling on one utterance. AVSpeechSynthesizer crashes/hangs on very
+    /// large utterances (CLAUDE.md), so text the tokenizer cannot break into
+    /// sentences (no punctuation for pages) is still split — at whitespace,
+    /// never inside a word.
+    private static let maxSentenceLength = 2000
+
     /// Splits text at paragraph breaks (2+ newlines), then subdivides any paragraph
-    /// longer than `maxChunkLength` at sentence boundaries (hard-splitting a single
-    /// overlong sentence). A .txt with single-newline paragraphs, or a chapter with
-    /// no blank lines, previously became ONE whole-document utterance.
+    /// longer than `maxChunkLength` at sentence boundaries. A .txt with
+    /// single-newline paragraphs, or a chapter with no blank lines, previously
+    /// became ONE whole-document utterance.
     /// willSpeakRangeOfSpeechString fires per-word inside each chunk.
     private func makeParagraphChunks(in text: String) -> [NSRange] {
         let ns = text as NSString
@@ -340,29 +372,51 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     /// Packs the sentences of `range` into chunks of at most `maxChunkLength`
-    /// UTF-16 units; a sentence longer than the cap is hard-split at the cap.
+    /// UTF-16 units. Sentences are never cut: one longer than the cap is a
+    /// chunk by itself (only past `maxSentenceLength` is it split, at spaces).
     private func subdivide(_ range: NSRange, in ns: NSString) -> [NSRange] {
         let cap = Self.maxChunkLength
         let para = ns.substring(with: range)
         var chunks: [NSRange] = []
         var current: NSRange?
         for local in makeSentenceRanges(in: para) {
-            var sentence = NSRange(location: range.location + local.location, length: local.length)
-            // Hard-split an overlong sentence.
-            while sentence.length > cap {
-                if let c = current { chunks.append(c); current = nil }
-                chunks.append(NSRange(location: sentence.location, length: cap))
-                sentence = NSRange(location: sentence.location + cap, length: sentence.length - cap)
-            }
-            if let c = current, NSMaxRange(sentence) - c.location <= cap {
-                current = NSRange(location: c.location, length: NSMaxRange(sentence) - c.location)
-            } else {
-                if let c = current { chunks.append(c) }
-                current = sentence
+            let whole = NSRange(location: range.location + local.location, length: local.length)
+            for sentence in splitAtWordBoundaries(whole, in: ns) {
+                if let c = current, NSMaxRange(sentence) - c.location <= cap {
+                    current = NSRange(location: c.location, length: NSMaxRange(sentence) - c.location)
+                } else {
+                    if let c = current { chunks.append(c) }
+                    current = sentence
+                }
             }
         }
         if let c = current { chunks.append(c) }
         return chunks.isEmpty ? [range] : chunks
+    }
+
+    /// Returns `range` unchanged unless it exceeds `maxSentenceLength`; then it
+    /// is cut after the last whitespace that fits, so no word is split. Text
+    /// with no whitespace at all (an unspaced CJK run) is cut at the ceiling,
+    /// on a composed-character boundary.
+    private func splitAtWordBoundaries(_ range: NSRange, in ns: NSString) -> [NSRange] {
+        let cap = Self.maxSentenceLength
+        var pieces: [NSRange] = []
+        var rest = range
+        while rest.length > cap {
+            let window = NSRange(location: rest.location, length: cap)
+            let space = ns.rangeOfCharacter(from: .whitespacesAndNewlines, options: .backwards, range: window)
+            var cut = rest.location + cap
+            if space.location != NSNotFound, space.location > rest.location {
+                cut = NSMaxRange(space)
+            } else {
+                let composed = ns.rangeOfComposedCharacterSequence(at: cut).location
+                if composed > rest.location { cut = composed }
+            }
+            pieces.append(NSRange(location: rest.location, length: cut - rest.location))
+            rest = NSRange(location: cut, length: NSMaxRange(rest) - cut)
+        }
+        if rest.length > 0 { pieces.append(rest) }
+        return pieces
     }
 
     // MARK: - Sentence segmentation
@@ -480,6 +534,9 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         Task { @MainActor [self] in
             // Last chunk finished and nothing else is queued: done.
             if m.chunkIndex + 1 >= chunkRanges.count {
+                chunkRanges = []
+                currentChunkIndex = 0
+                nextChunkToEnqueue = 0
                 isPlaying = false
                 spokenRange = nil
                 deactivateAudioSession()
