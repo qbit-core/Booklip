@@ -32,6 +32,12 @@ xcodebuild -project Booklip.xcodeproj -scheme Booklip \
 Always build after changes. Commit only when the user asks; end commit messages
 with `Co-Authored-By: Claude <noreply@anthropic.com>`.
 
+**Changelog is part of every change.** `README.md` holds the changelog twice —
+under `## English` and `## 한국어` — by date, oldest first. Whenever you change
+the app, add the entry to BOTH sections (same date heading `#### YYYY-MM-DD`,
+same items, version bumps in bold) without being asked, in the same commit as
+the change.
+
 ## Architecture (Booklip/)
 - **App/** — `BooklipApp` (entry, injects `LibraryViewModel` + `ReadingSettings`),
   `ViewExtensions` (`hideNavigationBar`, `readerCover`, `platformTrailing`).
