@@ -24,6 +24,12 @@ struct ContentsPanel: View {
                 case .highlights: highlightsList
                 }
             }
+#if os(macOS)
+            // A macOS sheet sizes itself to its content and a List has no
+            // intrinsic height, so without this the lists collapsed to nothing
+            // and the panel showed only the tab picker.
+            .frame(minWidth: 460, minHeight: 520)
+#endif
             .navigationTitle("Navigate")
             .inlineNavigationTitle()
             .toolbar {

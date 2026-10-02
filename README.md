@@ -231,6 +231,18 @@ Compiled from the commit history, by date, oldest first.
   mid-word — a whole sentence is read and highlighted at once.
 - Changed the App Store category from Productivity to Books.
 - Added this README with the full changelog in English and Korean.
+- macOS: fixed the Navigate panel (Contents / Bookmarks / Highlights) showing
+  only its tab picker — the lists had collapsed to zero height.
+- Added Mac App Store screenshots (2880×1800, Korean and English, 9 slides)
+  and Mac support in `AppStore/screenshots/compose.py`.
+- Reader (iOS and macOS): the last line of a page is no longer shown half
+  cut off. A line the bottom edge would cut is hidden and becomes the first
+  line of the next page.
+- Fixed library cards in dark mode: the title and author under each cover were
+  invisible on a hard-coded white card; the card background now follows the
+  light/dark appearance (macOS and iOS).
+- macOS: saved highlights are painted as soon as an EPUB opens — they used to
+  appear only after a later refresh such as starting TTS.
 - **Version 1.5.5 (build 11).**
 
 ## 한국어
@@ -422,4 +434,14 @@ Compiled from the commit history, by date, oldest first.
   자르지 않고 문장 전체를 한 번에 읽고 하이라이트.
 - App Store 카테고리를 생산성에서 도서로 변경.
 - 전체 변경 이력을 영어와 한국어로 담은 이 README 추가.
+- macOS: 탐색 패널(목차 / 책갈피 / 하이라이트)에 탭 선택기만 보이고 목록이 높이 0으로
+  접혀 있던 문제 수정.
+- Mac App Store 스크린샷 추가(2880×1800, 한국어·영어, 9장),
+  `AppStore/screenshots/compose.py`에 Mac 지원 추가.
+- 리더(iOS·macOS): 페이지 마지막 줄이 반쯤 잘려 보이지 않도록 수정. 아래쪽에서 잘릴
+  줄은 가리고 다음 페이지의 첫 줄로 보여 줌.
+- 다크 모드 보관함 카드 수정: 흰색으로 고정된 카드 배경 때문에 표지 아래 제목과 저자가
+  보이지 않던 문제 — 카드 배경이 라이트/다크 모드를 따르도록 변경(macOS, iOS).
+- macOS: EPUB을 열자마자 저장된 하이라이트가 표시되도록 수정 — 이전에는 TTS 시작 등
+  이후 갱신이 있어야 나타났음.
 - **버전 1.5.5 (빌드 11).**

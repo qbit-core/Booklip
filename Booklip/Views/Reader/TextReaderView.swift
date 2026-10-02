@@ -65,6 +65,58 @@ private func repaintSearchMatches(in storage: NSTextStorage,
     return matches[activeIdx]
 }
 
+// MARK: - Cut-off line detection (iOS and macOS)
+
+/// A page never shows a line the bottom edge cuts through: paging starts the
+/// next page at that line, and until then a cover in the page colour hides the
+/// part that is on screen. Both sides use the same test so the hidden line is
+/// exactly the one the next page opens with.
+private enum CutLine {
+    /// Bottom of the line's ink (baseline + descender) in container
+    /// coordinates. `used` also contains the paragraph style's line spacing
+    /// below the glyphs; that strip is empty, so losing it cuts nothing.
+    static func inkBottom(fragment: CGRect, used: CGRect, glyphRange: NSRange,
+                          lm: NSLayoutManager) -> CGFloat {
+        guard glyphRange.length > 0, let storage = lm.textStorage else { return used.maxY }
+        let ci = lm.characterIndexForGlyph(at: glyphRange.location)
+        guard ci < storage.length else { return used.maxY }
+        var descent: CGFloat = 0
+#if os(macOS)
+        if let f = storage.attribute(.font, at: ci, effectiveRange: nil) as? NSFont { descent = -f.descender }
+#else
+        if let f = storage.attribute(.font, at: ci, effectiveRange: nil) as? UIFont { descent = -f.descender }
+#endif
+        let baseline = fragment.minY + lm.location(forGlyphAt: glyphRange.location).y
+        return min(used.maxY, baseline + descent)
+    }
+
+    static func isCut(fragment: CGRect, used: CGRect, glyphRange: NSRange,
+                      lm: NSLayoutManager, bottom: CGFloat) -> Bool {
+        inkBottom(fragment: fragment, used: used, glyphRange: glyphRange, lm: lm) > bottom + 0.5
+    }
+
+    /// Top (container y) of the line that starts inside the viewport and runs
+    /// past its bottom edge, or nil when the last line fits. A fragment that
+    /// starts at or above the viewport top (an image taller than the screen)
+    /// is left alone — covering it would blank the page.
+    static func top(lm: NSLayoutManager, tc: NSTextContainer,
+                    viewportTop: CGFloat, bottom: CGFloat) -> CGFloat? {
+        let strip = CGRect(x: 0, y: bottom - 1, width: tc.size.width, height: 2)
+        let glyphs = lm.glyphRange(forBoundingRectWithoutAdditionalLayout: strip, in: tc)
+        guard glyphs.location != NSNotFound, glyphs.length > 0 else { return nil }
+        var result: CGFloat?
+        lm.enumerateLineFragments(forGlyphRange: glyphs) { rect, used, _, range, stop in
+            guard rect.minY < bottom else { stop.pointee = true; return }
+            if rect.minY > viewportTop + 1,
+               isCut(fragment: rect, used: used, glyphRange: range, lm: lm, bottom: bottom) {
+                result = rect.minY
+                stop.pointee = true
+            }
+        }
+        return result
+    }
+}
+
 struct TextReaderView: View {
     @ObservedObject var vm: ReaderViewModel
     @ObservedObject var settings: ReadingSettings
@@ -247,6 +299,20 @@ struct NativeTextView: NSViewRepresentable {
             name: NSScrollView.didLiveScrollNotification,
             object: scrollView
         )
+        // Keep the cut-off-line cover in step with every way the page can move
+        // or resize.
+        let clip = scrollView.contentView
+        clip.postsBoundsChangedNotifications = true
+        clip.postsFrameChangedNotifications = true
+        let nc = NotificationCenter.default
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.clipViewChanged),
+                       name: NSView.boundsDidChangeNotification, object: clip)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.clipViewChanged),
+                       name: NSView.frameDidChangeNotification, object: clip)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.liveScrollBegan),
+                       name: NSScrollView.willStartLiveScrollNotification, object: scrollView)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.liveScrollEnded),
+                       name: NSScrollView.didEndLiveScrollNotification, object: scrollView)
         context.coordinator.installKeyMonitor()
         // Layer-backed so page turns can animate with a CATransition (paper mode
         // pushes horizontally, vertical-slide pushes vertically) like iOS does.
@@ -392,13 +458,19 @@ struct NativeTextView: NSViewRepresentable {
         if let storage = textView.textStorage, storage.length > 0 {
             storage.addAttribute(.foregroundColor, value: color,
                                  range: NSRange(location: 0, length: storage.length))
-            for h in highlights where NSMaxRange(h.range) <= storage.length {
-                storage.addAttribute(.backgroundColor,
-                                     value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
-                                     range: h.range)
-            }
+            paintHighlights(in: storage)
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
+    }
+
+    // Paints the saved user highlights into `string` (the text storage, or the
+    // attributed string about to be installed into it).
+    private func paintHighlights(in string: NSMutableAttributedString) {
+        for h in highlights where NSMaxRange(h.range) <= string.length {
+            string.addAttribute(.backgroundColor,
+                                value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
+                                range: h.range)
+        }
     }
 
     private func applyContent(to textView: NSTextView) {
@@ -448,7 +520,11 @@ struct NativeTextView: NSViewRepresentable {
                     }
                 }
             }
+            // This path used to return without painting, so an EPUB opened with
+            // no highlight colours until TTS or a theme change repainted them.
+            paintHighlights(in: result)
             textView.textStorage?.setAttributedString(result)
+            textView.backgroundColor = NSColor(settings.currentPreset.background)
             return
         }
 
@@ -458,19 +534,11 @@ struct NativeTextView: NSViewRepresentable {
         if let attr = attributedText {
             let base = NSMutableAttributedString(attributedString: NSAttributedString(attr))
             base.addAttributes(styleAttrs, range: NSRange(location: 0, length: base.length))
-            for h in highlights where NSMaxRange(h.range) <= base.length {
-                base.addAttribute(NSAttributedString.Key.backgroundColor,
-                                  value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
-                                  range: h.range)
-            }
+            paintHighlights(in: base)
             textView.textStorage?.setAttributedString(base)
         } else if let str = text {
             let base = NSMutableAttributedString(string: str, attributes: styleAttrs)
-            for h in highlights where NSMaxRange(h.range) <= base.length {
-                base.addAttribute(.backgroundColor,
-                                  value: NSColor(HighlightColor(rawValue: h.colorName)?.color ?? .yellow).withAlphaComponent(0.4),
-                                  range: h.range)
-            }
+            paintHighlights(in: base)
             textView.textStorage?.setAttributedString(base)
         }
         textView.backgroundColor = NSColor(settings.currentPreset.background)
@@ -638,6 +706,54 @@ struct NativeTextView: NSViewRepresentable {
             if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
         }
 
+        // ── Cut-off line cover ───────────────────────────────────────────────
+        // While the page is at rest, a view in the page colour hides the line
+        // the bottom edge cuts through (see CutLine); it is the first line of
+        // the next page. Hidden during free scrolling, where lines must slide
+        // through the edge.
+        private final class CoverView: NSView {
+            override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        }
+        private var cutCover: CoverView?
+        private var cutCoverScheduled = false
+        private var isLiveScrolling = false
+
+        @objc func clipViewChanged() { scheduleCutCover() }
+        @objc func liveScrollBegan() { isLiveScrolling = true; cutCover?.isHidden = true }
+        @objc func liveScrollEnded() { isLiveScrolling = false; scheduleCutCover() }
+
+        func scheduleCutCover() {
+            guard !cutCoverScheduled else { return }
+            cutCoverScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.cutCoverScheduled = false
+                self.updateCutCover()
+            }
+        }
+
+        func updateCutCover() {
+            guard !isDismantled, let sv = scrollView, let tv = sv.documentView as? NSTextView,
+                  let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+            let visible = sv.contentView.bounds
+            let inset = tv.textContainerInset.height
+            let top = visible.minY - inset
+            guard !isLiveScrolling, visible.height > 0, tv.textStorage?.length ?? 0 > 0,
+                  let lineTop = CutLine.top(lm: lm, tc: tc, viewportTop: top, bottom: top + visible.height)
+            else { cutCover?.isHidden = true; return }
+            let cover = cutCover ?? {
+                let v = CoverView()
+                v.wantsLayer = true
+                cutCover = v
+                return v
+            }()
+            if cover.superview !== tv { tv.addSubview(cover) }
+            cover.layer?.backgroundColor = tv.backgroundColor.cgColor
+            cover.frame = CGRect(x: 0, y: lineTop + inset, width: tv.bounds.width,
+                                 height: visible.maxY - (lineTop + inset))
+            cover.isHidden = false
+        }
+
         func navigatePage(direction: Int) {
             guard let sv = scrollView else { return }
             let visibleHeight = sv.contentView.bounds.height
@@ -645,9 +761,9 @@ struct NativeTextView: NSViewRepresentable {
             let scrollable = contentHeight - visibleHeight
             guard scrollable > 0 else { return }
             let current = sv.contentView.bounds.origin.y
-            // Same rule as iOS `page()`: land on the first line fragment that was
-            // not fully visible (forward) / the first line within one viewport
-            // above the current top (backward). A font-metric step under-measured
+            // Same rule as iOS `page()`: land on the first line the bottom edge
+            // cut (forward; the cover was hiding it) / the first line within one
+            // viewport above the current top (backward). A font-metric step under-measured
             // real line heights and repeated lines from the previous page.
             var target = current + CGFloat(direction) * (pageStep > 0 ? pageStep : visibleHeight)
             if let tv = sv.documentView as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer {
@@ -663,9 +779,10 @@ struct NativeTextView: NSViewRepresentable {
                 let range = lm.glyphRange(forBoundingRect: ensureRect, in: tc)
                 if range.location != NSNotFound, range.length > 0 {
                     var lineTop: CGFloat? = nil
-                    lm.enumerateLineFragments(forGlyphRange: range) { _, usedRect, _, _, stop in
-                        let hit = direction > 0 ? usedRect.maxY > bottomC + usedRect.height * 0.3
-                                                : usedRect.minY >= topC - visibleHeight - 0.5
+                    lm.enumerateLineFragments(forGlyphRange: range) { rect, usedRect, _, glyphs, stop in
+                        let hit = direction > 0
+                            ? CutLine.isCut(fragment: rect, used: usedRect, glyphRange: glyphs, lm: lm, bottom: bottomC)
+                            : usedRect.minY >= topC - visibleHeight - 0.5
                         if lineTop == nil, hit { lineTop = usedRect.minY; stop.pointee = true }
                     }
                     if let lineTop {
@@ -695,6 +812,7 @@ struct NativeTextView: NSViewRepresentable {
             (sv.contentView.layer ?? sv.layer)?.add(transition, forKey: "pageTurn")
             sv.contentView.scroll(to: NSPoint(x: 0, y: target))
             sv.reflectScrolledClipView(sv.contentView)
+            updateCutCover()   // inside the transaction, so the new page slides in already trimmed
             CATransaction.commit()
             isScrollingProgrammatically = false
             DispatchQueue.main.async { [weak self] in
@@ -1574,9 +1692,59 @@ struct NativeTextView: UIViewRepresentable {
                 let link = CADisplayLink(target: self, selector: #selector(autoScrollTick(_:)))
                 link.add(to: .main, forMode: .common)
                 displayLink = link
-            } else if !on {
+                cutCover?.isHidden = true
+            } else if !on, displayLink != nil {
                 displayLink?.invalidate()
                 displayLink = nil
+                scheduleCutCover()
+            }
+        }
+
+        // ── Cut-off line cover ───────────────────────────────────────────────
+        // While the page is at rest, a view in the page colour hides the line
+        // the bottom edge cuts through (see CutLine); it is the first line of
+        // the next page. Hidden while the text is moving under a finger or
+        // auto-scroll, where lines must slide through the edge.
+        private var cutCover: UIView?
+        private var cutCoverScheduled = false
+
+        func scheduleCutCover() {
+            guard !cutCoverScheduled else { return }
+            cutCoverScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.cutCoverScheduled = false
+                if let tv = self.textView { self.updateCutCover(in: tv) }
+            }
+        }
+
+        func updateCutCover(in tv: UITextView) {
+            let inset = tv.textContainerInset.top
+            let top = tv.contentOffset.y - inset
+            let moving = tv.isDragging || tv.isDecelerating || displayLink != nil
+            guard !moving, tv.bounds.height > 0, tv.textStorage.length > 0,
+                  let lineTop = CutLine.top(lm: tv.layoutManager, tc: tv.textContainer,
+                                            viewportTop: top, bottom: top + tv.bounds.height)
+            else { cutCover?.isHidden = true; return }
+            let cover = cutCover ?? {
+                let v = UIView()
+                v.isUserInteractionEnabled = false
+                cutCover = v
+                return v
+            }()
+            if cover.superview !== tv { tv.addSubview(cover) }
+            tv.bringSubviewToFront(cover)
+            cover.backgroundColor = settings.map { UIColor($0.currentPreset.background) } ?? tv.backgroundColor
+            cover.frame = CGRect(x: 0, y: lineTop + inset, width: tv.bounds.width,
+                                 height: tv.contentOffset.y + tv.bounds.height - (lineTop + inset))
+            cover.isHidden = false
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            if scrollView.isDragging || scrollView.isDecelerating || displayLink != nil {
+                cutCover?.isHidden = true
+            } else {
+                scheduleCutCover()      // programmatic move: seek, restore, TTS follow
             }
         }
 
@@ -2099,6 +2267,7 @@ struct NativeTextView: UIViewRepresentable {
         // Called one run-loop tick after ReaderTextView.layoutSubviews() — at this
         // point UIKit has set the final bounds, so we can measure and seek safely.
         func didLayout(in tv: UITextView) {
+            scheduleCutCover()      // rotation, font or content change moved the lines
             guard let target = pendingRestoreTarget else { return }
             guard tv.bounds.width > 0, tv.textStorage.length > 0 else { return }
 
@@ -2206,11 +2375,12 @@ struct NativeTextView: UIViewRepresentable {
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-            if !decelerate { commitProgress(scrollView) }
+            if !decelerate { commitProgress(scrollView); scheduleCutCover() }
         }
 
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
             commitProgress(scrollView)
+            scheduleCutCover()
         }
 
         func scrollViewDidScrollToTop(_ scrollView: UIScrollView) {
@@ -2374,8 +2544,8 @@ struct NativeTextView: UIViewRepresentable {
             // the next page re-showed several lines of the previous one; with the
             // bars hidden the bottom 120pt repeated on top of that.
             //
-            // Forward: the new top is the first line that was not fully visible
-            // (usedRect.maxY past the viewport bottom). Backward: the first line
+            // Forward: the new top is the first line the bottom edge cut (its
+            // ink ran past the viewport bottom; the cover was hiding it). Backward: the first line
             // whose top lies within one viewport above the current top line, so
             // the current top becomes the first line off the bottom of the new
             // page. Both read the laid-out geometry, so any font, spacing or
@@ -2406,13 +2576,14 @@ struct NativeTextView: UIViewRepresentable {
             var glyphIdx = NSNotFound
             var lineTop: CGFloat = 0
             let backwardLimit = topContainerY - visible
-            lm.enumerateLineFragments(forGlyphRange: boundedGlyphRange) { _, usedRect, _, glyphRange, stop in
-                // A line whose descender is clipped by a few points still reads
-                // fine; only a line missing more than 30% of its height is
-                // "not shown yet". Without this, the last line often repeated.
-                let clipTolerance = usedRect.height * 0.3
-                let hit = forward ? usedRect.maxY > bottomContainerY + clipTolerance
-                                  : usedRect.minY >= backwardLimit - 0.5
+            lm.enumerateLineFragments(forGlyphRange: boundedGlyphRange) { rect, usedRect, _, glyphRange, stop in
+                // Same test as the cover (CutLine): a line counts as shown only
+                // if all of its ink fit. The old rule accepted a line missing
+                // up to 30% of its height, which left half-cut lines on screen.
+                let hit = forward
+                    ? CutLine.isCut(fragment: rect, used: usedRect, glyphRange: glyphRange, lm: lm,
+                                    bottom: bottomContainerY)
+                    : usedRect.minY >= backwardLimit - 0.5
                 if glyphIdx == NSNotFound, hit {
                     glyphIdx = glyphRange.location
                     lineTop = usedRect.minY
@@ -2531,6 +2702,7 @@ struct NativeTextView: UIViewRepresentable {
             (tv as? ReaderTextView)?.pinnedOffsetY = finalTarget
             tv.setContentOffset(CGPoint(x: 0, y: finalTarget), animated: false)
             tv.layoutIfNeeded()
+            updateCutCover(in: tv)   // inside the transaction, so the new page slides in already trimmed
             CATransaction.commit()
         }
     }

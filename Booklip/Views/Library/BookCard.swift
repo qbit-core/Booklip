@@ -52,7 +52,7 @@ struct BookCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .background(Color(white: 1.0))
+            .background(cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
     }
@@ -65,6 +65,17 @@ struct BookCard: View {
             .background(.ultraThinMaterial)
             .clipShape(Capsule())
             .padding(8)
+    }
+
+    // Dynamic system colour: white in light mode, dark grey in dark mode. A
+    // hard-coded white left the primary/secondary title text (which turns
+    // light in dark mode) invisible on the card.
+    private var cardBackground: Color {
+#if os(macOS)
+        Color(nsColor: .controlBackgroundColor)
+#else
+        Color(uiColor: .secondarySystemGroupedBackground)
+#endif
     }
 
     private var coverImage: Image? { BookCover.image(for: book) }

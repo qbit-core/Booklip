@@ -109,8 +109,8 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   `ensureLayout(forCharacterRange:)` probe (0–1 ms). `sample <pid>` before
   trusting layout timings.
 - **Paging is line-fragment-based** (`page()` on iOS, `navigatePage` on macOS):
-  forward lands on the first line fragment not fully visible (maxY past the
-  viewport bottom by more than 30% of its height); backward on the first
+  forward lands on the first line the bottom edge cuts (its ink — baseline +
+  descender, `CutLine.isCut` — runs past the viewport bottom); backward on the first
   fragment within one viewport above the current top. No font-metric step —
   `fontSize + lineSpacing` under-measured real line heights (worse for Korean
   faces) and, combined with a 120pt-short "text area", re-showed several lines
@@ -120,6 +120,13 @@ Library multi-select also has sweep selection + All/None (`DragSelection.swift`)
   instantly (`animated:false`) + CATransition for the visual; animated scroll
   got reverted by contentSize growth. `pageTargetY` handles rapid taps;
   paging/dragging cancels `pendingRestore`.
+- **No half-cut last line.** While the page is at rest a cover view in the
+  page colour (`cutCover`, both platforms) hides the line the bottom edge cuts
+  through, and that same line is where the next page starts — both use
+  `CutLine`, so nothing is skipped or repeated. The cover is hidden while the
+  text moves under a finger, the scroll wheel or auto-scroll. Do not bring
+  back a "mostly visible counts as shown" tolerance in `page()` /
+  `navigatePage`: the cover would then hide a line the next page never shows.
 - **UITextView silently restores a stale scroll position.** Whenever TextKit
   revises the estimated document height (big txt: every few pages),
   `-[UITextView _updateContentSize]` calls
