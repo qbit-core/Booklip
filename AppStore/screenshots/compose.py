@@ -4,8 +4,10 @@ import os, sys
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 S = os.path.dirname(os.path.abspath(__file__))
-SHOTS = os.path.join(S, "shots")
-OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(S, "out")
+SHOTS = os.path.join(S, "raw")
+# usage: compose.py [device ...]   (iphone, ipad, mac; default: all)
+OUT = S
+ONLY = sys.argv[1:]
 FONT = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
 BOLD, SEMI, REG = 6, 4, 0
 
@@ -56,6 +58,13 @@ DEVICES = {
                    bezel=22, radius=110, text_top=150, prefix="iphone"),
     "ipad":   dict(canvas=(2064, 2752), shot_w=1740, shot_top=500, h1=118, h2=56,
                    bezel=30, radius=80, text_top=160, prefix="ipad"),
+    # Mac windows are captured with their own rounded corners (alpha), so no
+    # bezel is drawn. Landscape windows sit under a centred headline; portrait
+    # reader windows sit on the right with the text beside them.
+    "mac":    dict(canvas=(2880, 1800), prefix="mac", h1=104, h2=50, text_top=84,
+                   shot_w=2240, shot_top=330,
+                   tall_h=1580, tall_right=200, tall_h1=124, tall_h2=54,
+                   shots={"highlight_menu": "highlights"}),
 }
 
 
@@ -74,7 +83,78 @@ def fit_text(draw, text, font_path, index, size, max_w):
     return ImageFont.truetype(font_path, size, index=index)
 
 
+def wrap(draw, text, font, max_w):
+    lines, cur = [], ""
+    for word in text.split(" "):
+        trial = (cur + " " + word).strip()
+        if cur and draw.textlength(trial, font=font) > max_w:
+            lines.append(cur); cur = word
+        else:
+            cur = trial
+    lines.append(cur)
+    if len(lines) == 2:                 # balance two lines instead of leaving a stub
+        words = text.split(" ")
+        best = min(range(1, len(words)), key=lambda i: abs(
+            draw.textlength(" ".join(words[:i]), font=font) - draw.textlength(" ".join(words[i:]), font=font)))
+        if draw.textlength(" ".join(words[:best]), font=font) <= max_w:
+            lines = [" ".join(words[:best]), " ".join(words[best:])]
+    return lines
+
+
+def compose_mac(lang, slide, n):
+    d = DEVICES["mac"]
+    shot, h_ko, s_ko, h_en, s_en, bg, fg, subfg = slide
+    shot = d["shots"].get(shot, shot)
+    head, sub = (h_ko, s_ko) if lang == "ko" else (h_en, s_en)
+    W, H = d["canvas"]
+    canvas = Image.new("RGB", (W, H), bg)
+    draw = ImageDraw.Draw(canvas)
+    src = Image.open(os.path.join(SHOTS, f"mac_{shot}.png")).convert("RGBA")
+
+    if src.width > src.height:          # landscape window: headline on top
+        sw = d["shot_w"]; sh = int(src.height * sw / src.width)
+        x, y = (W - sw) // 2, d["shot_top"]
+        f1 = fit_text(draw, head, FONT, BOLD, d["h1"], W - 200)
+        f2 = fit_text(draw, sub, FONT, REG, d["h2"], W - 200)
+        ty = d["text_top"]
+        draw.text(((W - draw.textlength(head, font=f1)) / 2, ty), head, font=f1, fill=fg)
+        ty += int(d["h1"] * 1.3)
+        draw.text(((W - draw.textlength(sub, font=f2)) / 2, ty), sub, font=f2, fill=subfg)
+    else:                               # portrait window: text on the left
+        sh = d["tall_h"]; sw = int(src.width * sh / src.height)
+        x, y = W - d["tall_right"] - sw, (H - sh) // 2
+        left, max_w = 190, x - 190 - 130
+        f1 = fit_text(draw, head, FONT, BOLD, d["tall_h1"], max_w)
+        f2 = ImageFont.truetype(FONT, d["tall_h2"], index=REG)
+        lines = wrap(draw, sub, f2, max_w)
+        gap, lh = 56, int(d["tall_h2"] * 1.45)
+        block = f1.size + gap + lh * len(lines)
+        ty = (H - block) // 2
+        draw.text((left, ty), head, font=f1, fill=fg)
+        ty += f1.size + gap
+        for line in lines:
+            draw.text((left, ty), line, font=f2, fill=subfg); ty += lh
+
+    src = src.resize((sw, sh), Image.LANCZOS)
+    alpha = src.getchannel("A")
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sh_layer = Image.new("RGBA", src.size, (0, 0, 0, 0))
+    sh_layer.paste((0, 0, 0, 120), (0, 0), alpha)
+    shadow.paste(sh_layer, (x, y + 28), sh_layer)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(44))
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), shadow)
+    canvas.alpha_composite(src, (x, y))
+
+    out_dir = os.path.join(OUT, lang, "mac")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{n:02d}_{shot}.png")
+    canvas.convert("RGB").save(path, optimize=True)
+    return path
+
+
 def compose(device, lang, slide, n):
+    if device == "mac":
+        return compose_mac(lang, slide, n)
     d = DEVICES[device]
     shot, h_ko, s_ko, h_en, s_en, bg, fg, subfg = slide
     head, sub = (h_ko, s_ko) if lang == "ko" else (h_en, s_en)
@@ -121,6 +201,8 @@ def compose(device, lang, slide, n):
 
 
 for device in DEVICES:
+    if ONLY and device not in ONLY:
+        continue
     for lang in ("ko", "en"):
         for i, slide in enumerate(SLIDES, 1):
             print(compose(device, lang, slide, i))
