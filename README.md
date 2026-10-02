@@ -26,7 +26,7 @@ Compiled from the commit history, by date, newest first.
 
 #### 2026-10-01
 - Added a macOS app icon made from the iOS icon (16–1024 px, in the Mac
-  rounded shape); the icon sets are now named `iOS` and `Mac OS`. The Mac
+  rounded shape); the icon sets are now named `iOS` and `macOS`. The Mac
   build had no icon before.
 - **Version 1.5.5 (build 11).**
 - macOS: saved highlights are painted as soon as an EPUB opens — they used to
@@ -270,7 +270,7 @@ Compiled from the commit history, by date, newest first.
 
 #### 2026-10-01
 - iOS 아이콘으로 macOS 앱 아이콘 추가(16–1024px, Mac용 둥근 모양). 아이콘 세트
-  이름은 `iOS`와 `Mac OS`. 이전에는 Mac 빌드에 아이콘이 없었음.
+  이름은 `iOS`와 `macOS`. 이전에는 Mac 빌드에 아이콘이 없었음.
 - **버전 1.5.5 (빌드 11).**
 - macOS: EPUB을 열자마자 저장된 하이라이트가 표시되도록 수정 — 이전에는 TTS 시작 등
   이후 갱신이 있어야 나타났음.
