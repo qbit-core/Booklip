@@ -26,7 +26,10 @@ TEXT = {
 }
 
 
-def gradient():
+def gradient(size=(W, H), glow_box=(1900, -300, 3900, 1700)):
+    """Icon-green diagonal gradient with a soft light at `glow_box`
+    (behind the phones). Shared with make_search.py."""
+    W, H = size
     img = Image.new("RGB", (W, H))
     px = img.load()
     for y in range(H):
@@ -34,9 +37,8 @@ def gradient():
             # diagonal: lighter top-left, deeper bottom-right
             t = min(1.0, max(0.0, (y / H) * 0.7 + (x / W) * 0.3))
             px[x, y] = tuple(int(a + (b - a) * t) for a, b in zip(TOP, BOTTOM))
-    # soft light behind the phones
     glow = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(glow).ellipse((1900, -300, 3900, 1700), fill=70)
+    ImageDraw.Draw(glow).ellipse(glow_box, fill=70)
     glow = glow.filter(ImageFilter.GaussianBlur(260))
     img.paste(Image.new("RGB", (W, H), (255, 255, 255)), (0, 0), glow)
     return img
