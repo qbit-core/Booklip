@@ -24,6 +24,15 @@ See [CLAUDE.md](CLAUDE.md) for build instructions and architecture, and
 
 Compiled from the commit history, by date, newest first.
 
+#### 2026-10-16
+- Books are tagged with their language when imported (English, Korean,
+  Japanese, Simplified/Traditional Chinese, …), detected on-device from the
+  text; books already in the library are detected once in the background.
+- Library: a globe menu filters books by language, in All Books and Folders.
+- TTS picks a voice in the book's language when a book opens (Japanese and
+  Chinese voices are now offered too); a voice you choose is remembered for
+  every book in that language.
+
 #### 2026-10-01
 - Added a macOS app icon made from the iOS icon (16–1024 px, in the Mac
   rounded shape); the icon sets are now named `iOS` and `macOS`. The Mac
@@ -267,6 +276,14 @@ Compiled from the commit history, by date, newest first.
 ### 변경 이력
 
 커밋 기록을 날짜별로 정리한 것입니다(최신 날짜부터).
+
+#### 2026-10-16
+- 책을 가져올 때 본문으로 언어(영어, 한국어, 일본어, 중국어 간체/번체 등)를
+  기기에서 감지해 기록합니다. 이미 라이브러리에 있는 책은 백그라운드에서
+  한 번 감지합니다.
+- 라이브러리: 지구본 메뉴로 언어별 책 필터링 (전체 책·폴더 모두).
+- TTS가 책을 열 때 책 언어에 맞는 음성을 자동 선택합니다 (일본어·중국어
+  음성도 추가). 직접 고른 음성은 그 언어의 모든 책에 기억됩니다.
 
 #### 2026-10-01
 - iOS 아이콘으로 macOS 앱 아이콘 추가(16–1024px, Mac용 둥근 모양). 아이콘 세트

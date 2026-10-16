@@ -102,6 +102,7 @@ struct LibraryView: View {
                 HStack(spacing: 12) {
                     ViewModeMenu()
                     SortMenu()
+                    LanguageMenu()
 
                     Button { showingStats = true } label: {
                         Image(systemName: "chart.bar")
@@ -202,6 +203,7 @@ struct BookSelectionModifier: ViewModifier {
                         HStack(spacing: 12) {
                             ViewModeMenu()
                             SortMenu()
+                            LanguageMenu()
                             Button { library.setSelecting(true) } label: {
                                 Image(systemName: "checkmark.circle")
                             }
@@ -256,6 +258,44 @@ struct SortMenu: View {
     }
 }
 
+/// Filters the library by detected book language. Hidden until the library
+/// holds at least one book with a known language.
+struct LanguageMenu: View {
+    @EnvironmentObject private var library: LibraryViewModel
+    var body: some View {
+        let counts = library.languageCounts
+        if !counts.isEmpty || library.languageFilter != nil {
+            Menu {
+                Button {
+                    library.languageFilter = nil
+                } label: {
+                    if library.languageFilter == nil {
+                        Label("All Languages", systemImage: "checkmark")
+                    } else {
+                        Text("All Languages")
+                    }
+                }
+                Divider()
+                ForEach(counts, id: \.code) { entry in
+                    Button {
+                        library.languageFilter = entry.code
+                    } label: {
+                        let title = "\(LanguageDetector.displayName(for: entry.code)) (\(entry.count))"
+                        if library.languageFilter == entry.code {
+                            Label(title, systemImage: "checkmark")
+                        } else {
+                            Text(title)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "globe")
+                    .foregroundStyle(library.languageFilter == nil ? Color.primary : Color.accentColor)
+            }
+        }
+    }
+}
+
 // MARK: - Shared books collection (grid or list, with selection)
 
 struct BooksCollection: View {
@@ -293,7 +333,17 @@ private struct AllBooksView: View {
     private var filtered: [Book] { library.filteredBooks(search: searchText) }
 
     var body: some View {
-        if filtered.isEmpty {
+        if filtered.isEmpty && !library.books.isEmpty {
+            if searchText.trimmingCharacters(in: .whitespaces).isEmpty, let code = library.languageFilter {
+                ContentUnavailableView {
+                    Label("No \(LanguageDetector.displayName(for: code)) Books", systemImage: "globe")
+                } actions: {
+                    Button("Show All Languages") { library.languageFilter = nil }
+                }
+            } else {
+                ContentUnavailableView.search(text: searchText)
+            }
+        } else if filtered.isEmpty {
             VStack(spacing: 20) {
                 Image(systemName: "books.vertical").font(.system(size: 60)).foregroundStyle(.tertiary)
                 Text("No Books Yet").font(.title2.bold())
@@ -349,6 +399,8 @@ private struct FoldersView: View {
                 if visibleFolders.isEmpty && matchingBooks.isEmpty {
                     ContentUnavailableView.search(text: searchText)
                 }
+            } else if let code = library.languageFilter, visibleFolders.isEmpty && visibleUnfiled.isEmpty {
+                ContentUnavailableView("No \(LanguageDetector.displayName(for: code)) Books", systemImage: "globe")
             } else if library.folders.isEmpty && library.unfolderedBooks.isEmpty {
                 ContentUnavailableView("No Folders", systemImage: "folder",
                     description: Text("Tap the folder+ button to create one."))

@@ -73,7 +73,10 @@ swipe paging, **auto-scroll**, nested **table of contents** (NCX/nav),
 bottom bar → select → "Highlight" edit menu; macOS: select → context menu),
 `ContentsPanel` (TOC / bookmarks / highlights) from the list button,
 reading-position restore. **TTS** (en-US + ko-KR voices, speed/pitch, word
-highlight + follow, sleep timer). **Reading stats** (time + streak).
+highlight + follow, sleep timer). **Reading stats** (time + streak). **Language detection** (`LanguageDetector`:
+Unicode script counts for ko/ja/zh, `NLLanguageRecognizer` for the rest and
+zh-Hans/zh-Hant) → `Book.language`, library language filter (`LanguageMenu`),
+TTS voice auto-pick per book language (user picks remembered per language).
 **Cloud import** via OAuth (Dropbox, Google Drive, OneDrive — all live;
 listings follow pagination cursors). The browser's Select mode picks files
 AND folders (a cloud folder becomes a library folder of the same name,

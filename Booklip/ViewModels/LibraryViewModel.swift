@@ -14,6 +14,11 @@ class LibraryViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(viewMode.rawValue, forKey: "viewMode") }
     }
 
+    /// Library-wide language filter (a `Book.language` code); nil = all.
+    @Published var languageFilter: String? = UserDefaults.standard.string(forKey: "languageFilter") {
+        didSet { UserDefaults.standard.set(languageFilter, forKey: "languageFilter") }
+    }
+
     // Multi-select state
     @Published var isSelecting = false
     @Published var selectedBookIDs: Set<UUID> = []
@@ -30,6 +35,7 @@ class LibraryViewModel: ObservableObject {
             viewMode = mode
         }
         migrateUUIDTitles()
+        detectMissingLanguages()
         syncFromCloud()
         ProgressSync.startObserving { [weak self] in self?.syncFromCloud() }
     }
@@ -85,24 +91,35 @@ class LibraryViewModel: ObservableObject {
         filter(sorted(books), search: search)
     }
 
-    /// Title/author match; an empty query keeps everything.
+    /// Title/author match within the language filter; an empty query keeps
+    /// everything in that language.
     func filter(_ list: [Book], search: String) -> [Book] {
         let q = search.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return list }
-        return list.filter {
+        let inLanguage = languageFilter.map { code in list.filter { $0.language == code } } ?? list
+        guard !q.isEmpty else { return inLanguage }
+        return inLanguage.filter {
             $0.title.localizedCaseInsensitiveContains(q) ||
             $0.author.localizedCaseInsensitiveContains(q)
         }
     }
 
     /// Folders to show for a query: name matches, or the folder holds a
-    /// matching book.
+    /// matching book. Under a language filter, only folders holding a book in
+    /// that language.
     func filteredFolders(search: String) -> [BookFolder] {
         let q = search.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return folders }
+        guard !q.isEmpty || languageFilter != nil else { return folders }
         return folders.filter { f in
-            f.name.localizedCaseInsensitiveContains(q) || !filter(books(in: f), search: q).isEmpty
+            !filter(books(in: f), search: q).isEmpty ||
+            (!q.isEmpty && languageFilter == nil && f.name.localizedCaseInsensitiveContains(q))
         }
+    }
+
+    /// Detected languages in the library with their book counts, most common first.
+    var languageCounts: [(code: String, count: Int)] {
+        Dictionary(grouping: books.compactMap(\.language), by: { $0 })
+            .map { (code: $0.key, count: $0.value.count) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.code < $1.code }
     }
 
     func moveSelected(to folder: BookFolder?) {
@@ -216,6 +233,7 @@ class LibraryViewModel: ObservableObject {
                 let title = parsed.title.isEmpty || parsed.title == fileNameStem ? originalName : parsed.title
                 var book = Book(title: title, author: parsed.author, format: format, fileName: fileName)
                 book.wordCount = parsed.wordCount
+                book.language = LanguageDetector.detect(parsed.plainText)
                 book.folderID = folder?.id
                 if let cover = parsed.coverImage {
                     book.coverFileName = BookStore.saveCover(cover, for: fileName)
@@ -263,6 +281,25 @@ class LibraryViewModel: ObservableObject {
     }
 
     // MARK: - Migration
+
+    /// Books imported before language detection existed: parse each once in
+    /// the background and store its language. Detection always stores a value
+    /// ("und" when there is no text), so this finishes for good.
+    private func detectMissingLanguages() {
+        let pending = books.filter { $0.language == nil }.map { ($0.id, $0.fileURL, $0.format) }
+        guard !pending.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async {
+            for (id, url, format) in pending {
+                let text = (try? ParserFactory.parse(url: url, format: format))?.plainText ?? ""
+                let language = LanguageDetector.detect(text)
+                DispatchQueue.main.async {
+                    guard let i = self.books.firstIndex(where: { $0.id == id }) else { return }
+                    self.books[i].language = language
+                    BookStore.save(self.books)
+                }
+            }
+        }
+    }
 
     private func migrateUUIDTitles() {
         // Run only once — opening PDFDocument for every PDF on every launch is slow.

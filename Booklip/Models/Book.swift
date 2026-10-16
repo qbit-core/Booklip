@@ -71,6 +71,9 @@ struct Book: Identifiable, Codable {
     var folderID: UUID? = nil
     var coverFileName: String? = nil
     var progressUpdated: Date? = nil   // when progress was last changed (for iCloud sync)
+    /// BCP-47 code from `LanguageDetector` ("ko", "en", "zh-Hant"…); nil = not
+    /// detected yet (books imported before detection existed), "und" = no text.
+    var language: String? = nil
 
     var fileURL: URL {
         BookStore.documentsDirectory.appendingPathComponent(fileName)
@@ -93,7 +96,7 @@ struct Book: Identifiable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case id, title, author, format, fileName, progress, charIndex
-        case dateAdded, wordCount, folderID, coverFileName, progressUpdated
+        case dateAdded, wordCount, folderID, coverFileName, progressUpdated, language
     }
 
     init(title: String, author: String = "Unknown", format: BookFormat, fileName: String) {
@@ -117,5 +120,6 @@ struct Book: Identifiable, Codable {
         folderID      = try c.decodeIfPresent(UUID.self,   forKey: .folderID)
         coverFileName = try c.decodeIfPresent(String.self, forKey: .coverFileName)
         progressUpdated = try c.decodeIfPresent(Date.self, forKey: .progressUpdated)
+        language      = try c.decodeIfPresent(String.self, forKey: .language)
     }
 }

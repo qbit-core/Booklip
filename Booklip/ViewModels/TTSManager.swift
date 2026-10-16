@@ -11,7 +11,11 @@ import SwiftUI
 @MainActor
 class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var isPlaying = false
-    @Published var selectedVoiceID: String = ""
+    /// Remembered per book language (see `rememberVoice`), so picking a voice
+    /// for one Korean book picks it for every Korean book.
+    @Published var selectedVoiceID: String = "" {
+        didSet { rememberVoice() }
+    }
     @Published var rate: Float = AVSpeechUtteranceDefaultSpeechRate
     @Published var pitch: Float = 1.0
 
@@ -57,7 +61,17 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // Cached once — speechVoices() hits an AVFoundation internal decoder on
     // repeated calls which logs a DecodingError and can return an empty list.
+    private var allVoices: [AVSpeechSynthesisVoice] = []
+    /// Voices offered in the picker: the open book's language first, then the
+    /// languages Booklip always offers.
     @Published private(set) var availableVoices: [AVSpeechSynthesisVoice] = []
+
+    /// The open book's language (`LanguageDetector` code), nil until known.
+    private(set) var bookLanguage: String?
+    /// True while the app (not the user) changes the voice — only a user's
+    /// pick is remembered for the language.
+    private var autoSelecting = false
+    private static let pickerLanguages = ["en-US", "ko-KR", "ja-JP", "zh-CN", "zh-TW"]
 
     var selectedVoice: AVSpeechSynthesisVoice? {
         availableVoices.first { $0.identifier == selectedVoiceID } ?? availableVoices.first
@@ -79,24 +93,80 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func refreshVoices() {
-        let all = AVSpeechSynthesisVoice.speechVoices()
-        // Prefer high-quality named voices; fall back to any en-US / ko-KR voice.
-        let preferred = all.filter { voice in
-            let lang = voice.language.lowercased()
-            let name = voice.name.lowercased()
-            return (lang.hasPrefix("en-us") || lang.hasPrefix("ko-kr")) &&
-                (name.contains("yuna") || name.contains("eddy") ||
-                 name.contains("flo") || name.contains("samantha"))
+        if allVoices.isEmpty { allVoices = AVSpeechSynthesisVoice.speechVoices() }
+        let voices = allVoices.filter { voice in
+            Self.pickerLanguages.contains(voice.language) || matchesBookLanguage(voice)
         }
-        let voices = preferred.isEmpty
-            ? all.filter { $0.language.lowercased().hasPrefix("en-us") || $0.language.lowercased().hasPrefix("ko-kr") }
-            : preferred
         availableVoices = voices.sorted {
-            $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
+            let (a, b) = (matchesBookLanguage($0), matchesBookLanguage($1))
+            if a != b { return a }
+            return $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
         }
         if selectedVoiceID.isEmpty || !availableVoices.contains(where: { $0.identifier == selectedVoiceID }) {
             selectedVoiceID = availableVoices.first?.identifier ?? ""
         }
+    }
+
+    /// Picks the voice for a book's language: the voice last chosen for that
+    /// language, else the best installed one (no novelty voices, main region
+    /// first, premium > enhanced > default). Keeps the current voice when the language is
+    /// unknown or no installed voice speaks it.
+    func selectVoice(forLanguage code: String?) {
+        guard let code, code != LanguageDetector.undetermined else { return }
+        autoSelecting = true
+        defer { autoSelecting = false }
+        bookLanguage = code
+        refreshVoices()
+        let candidates = availableVoices.filter(matchesBookLanguage)
+        guard !candidates.isEmpty else { return }
+        if let saved = UserDefaults.standard.string(forKey: voiceKey(code)),
+           candidates.contains(where: { $0.identifier == saved }) {
+            selectedVoiceID = saved
+            return
+        }
+        let regions = Self.preferredRegions(for: code)
+        // Novelty voices (Albert, Bubbles, Whisper…) sort first by name but
+        // are no default for reading a book.
+        func rank(_ v: AVSpeechSynthesisVoice) -> (Int, Int, Int) {
+            let region = regions.firstIndex(of: v.language) ?? regions.count
+            let novelty = v.voiceTraits.contains(.isNoveltyVoice) ? 1 : 0
+            return (novelty, region, -v.quality.rawValue)
+        }
+        if let best = candidates.min(by: { rank($0) < rank($1) }) {
+            selectedVoiceID = best.identifier
+        }
+    }
+
+    /// Does `voice` speak the open book's language? Chinese also matches the
+    /// script: Traditional → zh-TW / zh-HK, Simplified → zh-CN.
+    private func matchesBookLanguage(_ voice: AVSpeechSynthesisVoice) -> Bool {
+        guard let code = bookLanguage else { return false }
+        let base = LanguageDetector.baseCode(code)
+        guard LanguageDetector.baseCode(voice.language) == base else { return false }
+        if base == "zh" {
+            let traditional = voice.language == "zh-TW" || voice.language == "zh-HK"
+            return code == "zh-Hant" ? traditional : !traditional
+        }
+        return true
+    }
+
+    private static func preferredRegions(for code: String) -> [String] {
+        switch code {
+        case "en":      return ["en-US", "en-GB"]
+        case "ko":      return ["ko-KR"]
+        case "ja":      return ["ja-JP"]
+        case "zh-Hans": return ["zh-CN"]
+        case "zh-Hant": return ["zh-TW", "zh-HK"]
+        default:        return []
+        }
+    }
+
+    private func voiceKey(_ code: String) -> String { "ttsVoice.\(code)" }
+
+    private func rememberVoice() {
+        guard !autoSelecting, let code = bookLanguage,
+              let voice = selectedVoice, matchesBookLanguage(voice) else { return }
+        UserDefaults.standard.set(voice.identifier, forKey: voiceKey(code))
     }
 
     // MARK: - Public API
@@ -109,6 +179,8 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func speak(text: String, from offset: Int = 0) {
+        // Book opened before its language was detected: decide now.
+        if bookLanguage == nil { selectVoice(forLanguage: LanguageDetector.detect(text)) }
         synthesizer.stopSpeaking(at: .immediate)
         clearMeta()
         fullText = text as NSString

@@ -143,6 +143,7 @@ struct ReaderView: View {
         .onAppear {
             sessionStart = Date()
             tts.setNowPlaying(title: book.title, artist: book.author)   // lock-screen card
+            tts.selectVoice(forLanguage: book.language)                // voice in the book's language
         }
         .onDisappear {
             saveProgress()
