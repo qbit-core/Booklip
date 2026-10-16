@@ -25,6 +25,8 @@ See [CLAUDE.md](CLAUDE.md) for build instructions and architecture, and
 Compiled from the commit history, by date, newest first.
 
 #### 2026-10-16
+- Added `WHATS_NEW.md`: App Store release notes for the next update in
+  Korean, English, Simplified Chinese, Traditional Chinese and Japanese.
 - Books are tagged with their language when imported (English, Korean,
   Japanese, Simplified/Traditional Chinese, …), detected on-device from the
   text; books already in the library are detected once in the background.
@@ -278,6 +280,8 @@ Compiled from the commit history, by date, newest first.
 커밋 기록을 날짜별로 정리한 것입니다(최신 날짜부터).
 
 #### 2026-10-16
+- `WHATS_NEW.md` 추가: 다음 업데이트의 App Store 업데이트 내역을 한국어,
+  영어, 중국어(간체), 중국어(번체), 일본어로 정리했습니다.
 - 책을 가져올 때 본문으로 언어(영어, 한국어, 일본어, 중국어 간체/번체 등)를
   기기에서 감지해 기록합니다. 이미 라이브러리에 있는 책은 백그라운드에서
   한 번 감지합니다.
