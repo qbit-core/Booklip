@@ -24,6 +24,13 @@ See [CLAUDE.md](CLAUDE.md) for build instructions and architecture, and
 
 Compiled from the commit history, by date, newest first.
 
+#### 2026-10-17
+- TTS voice list shows only the book's language in its main region (an
+  English book lists en-US voices, not every English-speaking country), and
+  no longer adds other languages' voices once the language is known.
+- Apple's novelty voices (Albert, Bubbles, Jester, Whisper, Zarvox, …) are
+  no longer offered for TTS.
+
 #### 2026-10-16
 - Added search-result artwork (3840×2560) next to the header: English,
   Korean and no-text versions from `make_search.py` — five iPhones fanned
@@ -284,6 +291,13 @@ Compiled from the commit history, by date, newest first.
 ### 변경 이력
 
 커밋 기록을 날짜별로 정리한 것입니다(최신 날짜부터).
+
+#### 2026-10-17
+- TTS 음성 목록에 책 언어의 대표 지역 음성만 표시합니다 (영어 책이면 모든
+  영어권 국가가 아니라 en-US만). 언어를 감지한 뒤에는 다른 언어의 음성도
+  더 이상 함께 표시하지 않습니다.
+- Apple의 효과음 음성(Albert, Bubbles, Jester, Whisper, Zarvox 등)은 TTS
+  음성 목록에서 제외했습니다.
 
 #### 2026-10-16
 - 헤더 옆에 검색 결과 이미지(3840×2560) 추가: 영어·한국어·텍스트 없는 버전,

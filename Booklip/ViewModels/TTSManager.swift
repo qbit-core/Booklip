@@ -62,8 +62,9 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // Cached once — speechVoices() hits an AVFoundation internal decoder on
     // repeated calls which logs a DecodingError and can return an empty list.
     private var allVoices: [AVSpeechSynthesisVoice] = []
-    /// Voices offered in the picker: the open book's language first, then the
-    /// languages Booklip always offers.
+    /// Voices offered in the picker: only the open book's language, in its
+    /// main region (an English book lists en-US voices, not en-GB / en-AU /
+    /// en-IN…). Before the language is known: `pickerLanguages`.
     @Published private(set) var availableVoices: [AVSpeechSynthesisVoice] = []
 
     /// The open book's language (`LanguageDetector` code), nil until known.
@@ -93,14 +94,18 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func refreshVoices() {
-        if allVoices.isEmpty { allVoices = AVSpeechSynthesisVoice.speechVoices() }
-        let voices = allVoices.filter { voice in
-            Self.pickerLanguages.contains(voice.language) || matchesBookLanguage(voice)
+        // Novelty voices (Albert, Bubbles, Jester, Whisper, Zarvox…) are sound
+        // effects, not voices to read a book with — never offered.
+        if allVoices.isEmpty {
+            allVoices = AVSpeechSynthesisVoice.speechVoices()
+                .filter { !$0.voiceTraits.contains(.isNoveltyVoice) }
         }
+        let book = bookVoices()
+        let voices = book.isEmpty
+            ? allVoices.filter { Self.pickerLanguages.contains($0.language) }
+            : book
         availableVoices = voices.sorted {
-            let (a, b) = (matchesBookLanguage($0), matchesBookLanguage($1))
-            if a != b { return a }
-            return $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
+            $0.language == $1.language ? $0.name < $1.name : $0.language < $1.language
         }
         if selectedVoiceID.isEmpty || !availableVoices.contains(where: { $0.identifier == selectedVoiceID }) {
             selectedVoiceID = availableVoices.first?.identifier ?? ""
@@ -108,8 +113,7 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     /// Picks the voice for a book's language: the voice last chosen for that
-    /// language, else the best installed one (no novelty voices, main region
-    /// first, premium > enhanced > default). Keeps the current voice when the language is
+    /// language, else the best installed one (premium > enhanced > default). Keeps the current voice when the language is
     /// unknown or no installed voice speaks it.
     func selectVoice(forLanguage code: String?) {
         guard let code, code != LanguageDetector.undetermined else { return }
@@ -117,55 +121,44 @@ class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         defer { autoSelecting = false }
         bookLanguage = code
         refreshVoices()
-        let candidates = availableVoices.filter(matchesBookLanguage)
+        let candidates = bookVoices()
         guard !candidates.isEmpty else { return }
         if let saved = UserDefaults.standard.string(forKey: voiceKey(code)),
            candidates.contains(where: { $0.identifier == saved }) {
             selectedVoiceID = saved
             return
         }
-        let regions = Self.preferredRegions(for: code)
-        // Novelty voices (Albert, Bubbles, Whisper…) sort first by name but
-        // are no default for reading a book.
-        func rank(_ v: AVSpeechSynthesisVoice) -> (Int, Int, Int) {
-            let region = regions.firstIndex(of: v.language) ?? regions.count
-            let novelty = v.voiceTraits.contains(.isNoveltyVoice) ? 1 : 0
-            return (novelty, region, -v.quality.rawValue)
-        }
-        if let best = candidates.min(by: { rank($0) < rank($1) }) {
+        // min(by: >) keeps the first (alphabetical) voice among equals.
+        if let best = candidates.min(by: { $0.quality.rawValue > $1.quality.rawValue }) {
             selectedVoiceID = best.identifier
         }
     }
 
-    /// Does `voice` speak the open book's language? Chinese also matches the
-    /// script: Traditional → zh-TW / zh-HK, Simplified → zh-CN.
-    private func matchesBookLanguage(_ voice: AVSpeechSynthesisVoice) -> Bool {
-        guard let code = bookLanguage else { return false }
+    /// Installed voices for the open book's language, in one region: the
+    /// language's main region ("en" → en-US, "zh-Hant" → zh-TW, "fr" → fr-FR,
+    /// from CLDR likely subtags), else the region with the most voices.
+    /// Empty when the language is unknown or no voice speaks it.
+    private func bookVoices() -> [AVSpeechSynthesisVoice] {
+        guard let code = bookLanguage else { return [] }
         let base = LanguageDetector.baseCode(code)
-        guard LanguageDetector.baseCode(voice.language) == base else { return false }
-        if base == "zh" {
-            let traditional = voice.language == "zh-TW" || voice.language == "zh-HK"
-            return code == "zh-Hant" ? traditional : !traditional
+        let maximal = Locale.Language(identifier: code).maximalIdentifier
+        if let region = Locale.Language(identifier: maximal).region?.identifier {
+            let main = allVoices.filter { $0.language == "\(base)-\(region)" }
+            if !main.isEmpty { return main }
         }
-        return true
-    }
-
-    private static func preferredRegions(for code: String) -> [String] {
-        switch code {
-        case "en":      return ["en-US", "en-GB"]
-        case "ko":      return ["ko-KR"]
-        case "ja":      return ["ja-JP"]
-        case "zh-Hans": return ["zh-CN"]
-        case "zh-Hant": return ["zh-TW", "zh-HK"]
-        default:        return []
+        // zh-HK voices speak Cantonese, not the Mandarin a zh book is written in.
+        let sameLanguage = allVoices.filter {
+            LanguageDetector.baseCode($0.language) == base && $0.language != "zh-HK"
         }
+        let byRegion = Dictionary(grouping: sameLanguage, by: \.language)
+        return byRegion.max { $0.value.count < $1.value.count }?.value ?? []
     }
 
     private func voiceKey(_ code: String) -> String { "ttsVoice.\(code)" }
 
     private func rememberVoice() {
-        guard !autoSelecting, let code = bookLanguage,
-              let voice = selectedVoice, matchesBookLanguage(voice) else { return }
+        guard !autoSelecting, let code = bookLanguage, let voice = selectedVoice,
+              bookVoices().contains(where: { $0.identifier == voice.identifier }) else { return }
         UserDefaults.standard.set(voice.identifier, forKey: voiceKey(code))
     }
 
